@@ -1,0 +1,25 @@
+{
+  "_comment": "A-grade coin pool — top market cap, high liquidity on Binance. 5 picked daily by rotation.",
+  "pool": [
+    "XRPUSDT",
+    "ADAUSDT",
+    "DOGEUSDT",
+    "AVAXUSDT",
+    "TRXUSDT",
+    "DOTUSDT",
+    "LINKUSDT",
+    "LTCUSDT",
+    "NEARUSDT",
+    "UNIUSDT",
+    "APTUSDT",
+    "ATOMUSDT",
+    "ARBUSDT",
+    "OPUSDT",
+    "INJUSDT",
+    "SUIUSDT",
+    "TIAUSDT",
+    "FETUSDT",
+    "JUPUSDT",
+    "AAVEUSDT"
+  ]
+}

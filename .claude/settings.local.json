@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-Content \"C:\\\\Users\\\\user\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\D--AI-Projects-python-cli-trading-system\\\\ec5ae5c3-2fcc-4486-a7a4-f550e207c57d\\\\tasks\\\\bh98ui7jf.output\" | Select-String \"cv_f1|Saved|SKIPPED|Activat|ERROR\" | ForEach-Object { $_.ToString\\(\\).Trim\\(\\) })"
+    ]
+  }
+}

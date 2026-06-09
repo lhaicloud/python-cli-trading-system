@@ -1,0 +1,9 @@
+{
+  "runner": "run_live_paper",
+  "pids": {
+    "BTCUSDT": 12072,
+    "ETHUSDT": 11388,
+    "SOLUSDT": 22548,
+    "BNBUSDT": 22732
+  }
+}

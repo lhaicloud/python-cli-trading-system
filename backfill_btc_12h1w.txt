@@ -1,0 +1,12 @@
+C:\Users\user\.pyenv\pyenv-win\versions\3.9.10\lib\site-packages\pydantic\_internal\_fields.py:160: UserWarning: Field "model_dir" has conflict with protected namespace "model_".
+
+You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ('settings_',)`.
+  warnings.warn(
+2026-05-28 10:48:35,414 [INFO    ] app.db.migrations — Migrations complete.
+
+Backfilling BTCUSDT | TFs: ['12h,1w'] | 2020-01-01 → now
+
+2026-05-28 10:48:36,559 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT "HTTP/1.1 200 OK"
+
+ERROR: Unknown timeframe: '12h,1w'. Valid: ['1m', '5m', '15m', '30m', '1h', 
+'2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w']

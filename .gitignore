@@ -1,0 +1,33 @@
+# Secrets
+.env
+
+# Database
+data/db/
+trading.db
+
+# ML models (large binary files)
+data/models/
+
+# Logs
+data/*.log
+data/*.txt
+logs/
+live_paper_may25.log
+live_rotation_may25.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+
+# Output / scratch files
+diagnose_output.txt
+master_retest_output*.txt
+verify_fixes_output*.txt
+
+# Misc
+*.lock

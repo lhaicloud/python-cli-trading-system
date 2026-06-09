@@ -1,0 +1,111 @@
+"""Central configuration using pydantic-settings."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+        protected_namespaces=("settings_",),
+    )
+
+    # Paths
+    db_path: Path = Field(default=Path("data/db/lqmtf.db"))
+    model_dir: Path = Field(default=Path("data/models"))
+    log_file: Path = Field(default=Path("data/lqmtf.log"))
+
+    # Binance — USDT-margined futures (fapi)
+    # Spot:    https://api.binance.com   — /api/v3/klines
+    # Futures: https://fapi.binance.com  — /fapi/v1/klines
+    binance_base_url: str = "https://fapi.binance.com"
+
+    # Optional proxy for Binance traffic. Binance geo-blocks US IPs (HTTP 451),
+    # so a US-hosted VM must route requests through a non-US proxy.
+    # Supports http://, https://, or socks5:// URLs, with optional credentials:
+    #   http://user:pass@host:port  |  socks5://host:port
+    # Empty = direct connection (no proxy).
+    binance_proxy_url: str = Field("", env="BINANCE_PROXY_URL")
+
+    # Logging
+    log_level: str = "INFO"
+
+    # Defaults
+    default_symbol: str = "BTCUSDT"
+    default_capital: float = 10_000.0
+    default_risk_pct: float = 1.0
+    default_max_daily_loss_pct: float = 3.0
+    # Futures leverage: max multiplier for dynamic_leverage()
+    # Default 1 = spot (no leverage). Set LEVERAGE=5 in .env to enable futures mode.
+    max_leverage: int = Field(1, env="LEVERAGE")
+    min_rr_ratio: float = 1.8
+    min_zone_score: float = 70.0
+    min_zone_score_no_model: float = 70.0
+    min_signal_confidence: float = 65.0
+
+    # Backtest — futures fees (taker 0.05% vs spot 0.10%)
+    backtest_fee_pct: float = 0.05
+    backtest_slippage_pct: float = 0.05
+
+    # Backtest validation thresholds — a run must pass ALL THREE to count as
+    # "profitable" for the purposes of the validated watchlist.
+    # net_profit > 0 alone is not enough (e.g. $0.90 on $10k = noise).
+    backtest_min_win_rate: float = Field(0.45, env="BACKTEST_MIN_WIN_RATE")   # 45%
+    backtest_min_trades:   int   = Field(5,    env="BACKTEST_MIN_TRADES")     # at least 5 trades
+    backtest_min_profit:   float = Field(0.0,  env="BACKTEST_MIN_PROFIT")     # > 0
+
+    # Telegram notifications
+    telegram_bot_token: str = ""
+    telegram_chat_id: str   = ""
+
+    # Supported timeframes in ascending order
+    supported_timeframes: list[str] = ["1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d", "1w"]
+
+    # Binance kline limit per request
+    binance_kline_limit: int = 1000
+
+    # ── MTF strategy settings ─────────────────────────────────────────────────
+    # Timeframe weights (must sum to 1.0)
+    # 1W is scored in the composite (not a hard gate) so weekly bias is a
+    # score contribution rather than an outright block.
+    mtf_tf_weight_1w:  float = Field(0.15, env="MTF_TF_WEIGHT_1W")
+    mtf_tf_weight_1d:  float = Field(0.20, env="MTF_TF_WEIGHT_1D")
+    mtf_tf_weight_12h: float = Field(0.15, env="MTF_TF_WEIGHT_12H")
+    mtf_tf_weight_4h:  float = Field(0.22, env="MTF_TF_WEIGHT_4H")
+    mtf_tf_weight_1h:  float = Field(0.18, env="MTF_TF_WEIGHT_1H")
+    mtf_tf_weight_30m: float = Field(0.10, env="MTF_TF_WEIGHT_30M")
+
+    # Score thresholds
+    mtf_min_score:     float = Field(55.0, env="MTF_MIN_SCORE")
+    mtf_min_score_gap: float = Field(15.0, env="MTF_MIN_SCORE_GAP")
+
+    # Entry filters
+    mtf_rsi_overbought:   float = Field(70.0, env="MTF_RSI_OVERBOUGHT")
+    mtf_rsi_oversold:     float = Field(30.0, env="MTF_RSI_OVERSOLD")
+    mtf_ema200_strict:    bool  = Field(True,  env="MTF_EMA200_STRICT")
+    mtf_min_volume_ratio: float = Field(0.8,   env="MTF_MIN_VOLUME_RATIO")
+
+    # Ratchet stop
+    mtf_ratchet_enabled: bool = Field(True, env="MTF_RATCHET_ENABLED")
+
+    def ensure_dirs(self) -> None:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        self.log_file.parent.mkdir(parents=True, exist_ok=True)
+
+
+_settings: Settings | None = None
+
+
+def get_settings() -> Settings:
+    global _settings
+    if _settings is None:
+        _settings = Settings()
+        _settings.ensure_dirs()
+    return _settings

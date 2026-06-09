@@ -1,0 +1,105 @@
+C:\Users\user\.pyenv\pyenv-win\versions\3.9.10\lib\site-packages\pydantic\_internal\_fields.py:160: UserWarning: Field "model_dir" has conflict with protected namespace "model_".
+
+You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ('settings_',)`.
+  warnings.warn(
+2026-05-28 10:49:08,976 [INFO    ] app.db.migrations — Migrations complete.
+
+Backfilling BTCUSDT | TFs: ['12h', '1w'] | 2020-01-01 → now
+
+2026-05-28 10:49:10,461 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT "HTTP/1.1 200 OK"
+2026-05-28 10:49:10,588 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=12h&limit=1000&startTime=1577836800000&endTime=1779936550143 "HTTP/1.1 200 OK"
+2026-05-28 10:49:10,929 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=12h&limit=1000&startTime=1621036800000&endTime=1779936550143 "HTTP/1.1 200 OK"
+2026-05-28 10:49:11,213 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=12h&limit=1000&startTime=1664236800000&endTime=1779936550143 "HTTP/1.1 200 OK"
+2026-05-28 10:49:11,520 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=12h&limit=1000&startTime=1707436800000&endTime=1779936550143 "HTTP/1.1 200 OK"
+2026-05-28 10:49:11,837 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=12h&limit=1000&startTime=1750636800000&endTime=1779936550143 "HTTP/1.1 200 OK"
+✓ [BTCUSDT 12h] Inserted 5 new candles
+2026-05-28 10:49:11,931 [INFO    ] app.data.validators — [BTCUSDT 12h] Data quality 100.0% — 4679/4678 candles
+  Data quality: 100.0% (4,679/4,678 candles)
+2026-05-28 10:49:12,053 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1w&limit=1000&startTime=1577836800000&endTime=1779936550143 "HTTP/1.1 200 OK"
+✓ [BTCUSDT 1w] Inserted 1 new candles
+2026-05-28 10:49:12,105 [INFO    ] app.data.validators — [BTCUSDT 1w] Data quality 100.0% — 334/334 candles
+  Data quality: 100.0% (334/334 candles)
+  [BTCUSDT 12h] Downloading ~4,678 candles ----------------------- 100% 0:00:00
+  [BTCUSDT 1w] Downloading ~334 candles    ----------------------- 100% 0:00:00
+
+Backfill complete.
+C:\Users\user\.pyenv\pyenv-win\versions\3.9.10\lib\site-packages\pydantic\_internal\_fields.py:160: UserWarning: Field "model_dir" has conflict with protected namespace "model_".
+
+You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ('settings_',)`.
+  warnings.warn(
+2026-05-28 10:49:14,166 [INFO    ] app.db.migrations — Migrations complete.
+
+Backfilling ETHUSDT | TFs: ['12h', '1w'] | 2020-01-01 → now
+
+2026-05-28 10:49:15,420 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT "HTTP/1.1 200 OK"
+2026-05-28 10:49:15,529 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=12h&limit=1000&startTime=1577836800000&endTime=1779936555222 "HTTP/1.1 200 OK"
+2026-05-28 10:49:15,898 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=12h&limit=1000&startTime=1621036800000&endTime=1779936555222 "HTTP/1.1 200 OK"
+2026-05-28 10:49:16,242 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=12h&limit=1000&startTime=1664236800000&endTime=1779936555222 "HTTP/1.1 200 OK"
+2026-05-28 10:49:16,527 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=12h&limit=1000&startTime=1707436800000&endTime=1779936555222 "HTTP/1.1 200 OK"
+2026-05-28 10:49:16,868 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=12h&limit=1000&startTime=1750636800000&endTime=1779936555222 "HTTP/1.1 200 OK"
+✓ [ETHUSDT 12h] Inserted 5 new candles
+2026-05-28 10:49:17,060 [INFO    ] app.data.validators — [ETHUSDT 12h] Data quality 100.0% — 4679/4678 candles
+  Data quality: 100.0% (4,679/4,678 candles)
+2026-05-28 10:49:17,215 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=1w&limit=1000&startTime=1577836800000&endTime=1779936555222 "HTTP/1.1 200 OK"
+✓ [ETHUSDT 1w] Inserted 1 new candles
+2026-05-28 10:49:17,294 [INFO    ] app.data.validators — [ETHUSDT 1w] Data quality 100.0% — 334/334 candles
+  Data quality: 100.0% (334/334 candles)
+  [ETHUSDT 12h] Downloading ~4,678 candles ----------------------- 100% 0:00:00
+  [ETHUSDT 1w] Downloading ~334 candles    ----------------------- 100% 0:00:00
+
+Backfill complete.
+C:\Users\user\.pyenv\pyenv-win\versions\3.9.10\lib\site-packages\pydantic\_internal\_fields.py:160: UserWarning: Field "model_dir" has conflict with protected namespace "model_".
+
+You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ('settings_',)`.
+  warnings.warn(
+2026-05-28 10:49:19,281 [INFO    ] app.db.migrations — Migrations complete.
+
+Backfilling SOLUSDT | TFs: ['12h', '1w'] | 2020-01-01 → now
+
+2026-05-28 10:49:20,599 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT "HTTP/1.1 200 OK"
+2026-05-28 10:49:20,727 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=SOLUSDT&interval=12h&limit=1000&startTime=1577836800000&endTime=1779936560373 "HTTP/1.1 200 OK"
+2026-05-28 10:49:21,002 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=SOLUSDT&interval=12h&limit=1000&startTime=1640304000000&endTime=1779936560373 "HTTP/1.1 200 OK"
+2026-05-28 10:49:21,279 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=SOLUSDT&interval=12h&limit=1000&startTime=1683504000000&endTime=1779936560373 "HTTP/1.1 200 OK"
+2026-05-28 10:49:21,540 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=SOLUSDT&interval=12h&limit=1000&startTime=1726704000000&endTime=1779936560373 "HTTP/1.1 200 OK"
+2026-05-28 10:49:21,812 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=SOLUSDT&interval=12h&limit=1000&startTime=1769904000000&endTime=1779936560373 "HTTP/1.1 200 OK"
+✓ [SOLUSDT 12h] Inserted 5 new candles
+2026-05-28 10:49:21,836 [INFO    ] app.data.validators — [SOLUSDT 12h] Data quality 90.5% — 4233/4678 candles
+  Data quality: 90.5% (4,233/4,678 candles)
+  ⚠ 445 missing candles out of 4678 expected
+  ⚠ Data completeness 90.5% — backtest results may be unreliable
+2026-05-28 10:49:21,943 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=SOLUSDT&interval=1w&limit=1000&startTime=1577836800000&endTime=1779936560373 "HTTP/1.1 200 OK"
+✓ [SOLUSDT 1w] Inserted 1 new candles
+2026-05-28 10:49:21,965 [INFO    ] app.data.validators — [SOLUSDT 1w] Data quality 90.7% — 303/334 candles
+  Data quality: 90.7% (303/334 candles)
+  ⚠ 31 missing candles out of 334 expected
+  ⚠ Data completeness 90.7% — backtest results may be unreliable
+  [SOLUSDT 12h] Downloading ~4,678 candles ----------------------- 100% 0:00:00
+  [SOLUSDT 1w] Downloading ~334 candles    ----------------------- 100% 0:00:00
+
+Backfill complete.
+C:\Users\user\.pyenv\pyenv-win\versions\3.9.10\lib\site-packages\pydantic\_internal\_fields.py:160: UserWarning: Field "model_dir" has conflict with protected namespace "model_".
+
+You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ('settings_',)`.
+  warnings.warn(
+2026-05-28 10:49:23,571 [INFO    ] app.db.migrations — Migrations complete.
+
+Backfilling BNBUSDT | TFs: ['12h', '1w'] | 2020-01-01 → now
+
+2026-05-28 10:49:25,313 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT "HTTP/1.1 200 OK"
+2026-05-28 10:49:25,452 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BNBUSDT&interval=12h&limit=1000&startTime=1577836800000&endTime=1779936565114 "HTTP/1.1 200 OK"
+2026-05-28 10:49:25,786 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BNBUSDT&interval=12h&limit=1000&startTime=1621036800000&endTime=1779936565114 "HTTP/1.1 200 OK"
+2026-05-28 10:49:26,048 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BNBUSDT&interval=12h&limit=1000&startTime=1664236800000&endTime=1779936565114 "HTTP/1.1 200 OK"
+2026-05-28 10:49:26,341 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BNBUSDT&interval=12h&limit=1000&startTime=1707436800000&endTime=1779936565114 "HTTP/1.1 200 OK"
+2026-05-28 10:49:26,739 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BNBUSDT&interval=12h&limit=1000&startTime=1750636800000&endTime=1779936565114 "HTTP/1.1 200 OK"
+✓ [BNBUSDT 12h] Inserted 5 new candles
+2026-05-28 10:49:26,834 [INFO    ] app.data.validators — [BNBUSDT 12h] Data quality 100.0% — 4679/4678 candles
+  Data quality: 100.0% (4,679/4,678 candles)
+2026-05-28 10:49:26,922 [INFO    ] httpx — HTTP Request: GET https://api.binance.com/api/v3/klines?symbol=BNBUSDT&interval=1w&limit=1000&startTime=1577836800000&endTime=1779936565114 "HTTP/1.1 200 OK"
+✓ [BNBUSDT 1w] Inserted 1 new candles
+2026-05-28 10:49:26,982 [INFO    ] app.data.validators — [BNBUSDT 1w] Data quality 100.0% — 334/334 candles
+  Data quality: 100.0% (334/334 candles)
+  [BNBUSDT 12h] Downloading ~4,678 candles ----------------------- 100% 0:00:00
+  [BNBUSDT 1w] Downloading ~334 candles    ----------------------- 100% 0:00:00
+
+Backfill complete.
+ALL_DONE

@@ -1,0 +1,44 @@
+[Unit]
+Description=LQ-MTF Live Strategy Watcher
+Documentation=https://github.com/lhaicloud/python-cli-trading-system
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/lqmtf
+
+# Activate the venv; pass env file
+Environment="PATH=/home/ubuntu/lqmtf/venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/home/ubuntu/lqmtf/.env
+
+# Auto-select top symbols from universe and re-sync Binance top-50 on every
+# startup so new high-volume coins are backfilled automatically.
+# --rescan-every 144 = rotate watchlist every 3 days (144 × 30m candles).
+ExecStart=/home/ubuntu/lqmtf/venv/bin/python main.py live \
+    --auto \
+    --sync \
+    --auto-n 4 \
+    --rescan-every 144 \
+    --risk 1.0 \
+    --heartbeat 8
+
+# Always restart on crash; wait 60s before retry so transient network
+# errors don't cause a tight restart loop.
+Restart=always
+RestartSec=60
+
+# Capture all output (Rich console + Python logger) to the journal.
+# View with:  journalctl -u lqmtf -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lqmtf
+
+# Graceful shutdown: SIGTERM triggers the watcher's Ctrl-C handler.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,54 @@
+{
+  "history": [
+    {
+      "date": "2026-05-25",
+      "coins": [
+        "SUIUSDT",
+        "AAVEUSDT",
+        "DOTUSDT",
+        "TRXUSDT",
+        "LINKUSDT"
+      ]
+    },
+    {
+      "date": "2026-05-26",
+      "coins": [
+        "OPUSDT",
+        "ADAUSDT",
+        "ARBUSDT",
+        "NEARUSDT",
+        "APTUSDT"
+      ]
+    },
+    {
+      "date": "2026-05-27",
+      "coins": [
+        "TIAUSDT",
+        "AVAXUSDT",
+        "UNIUSDT",
+        "SUIUSDT",
+        "DOGEUSDT"
+      ]
+    },
+    {
+      "date": "2026-05-28",
+      "coins": [
+        "ARBUSDT",
+        "XRPUSDT",
+        "NEARUSDT",
+        "APTUSDT",
+        "LINKUSDT"
+      ]
+    },
+    {
+      "date": "2026-05-29",
+      "coins": [
+        "JUPUSDT",
+        "FETUSDT",
+        "AVAXUSDT",
+        "SUIUSDT",
+        "DOTUSDT"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+[Unit]
+Description=LQ-MTF Live Strategy Watcher
+Documentation=https://github.com/lhaicloud/python-cli-trading-system
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/lqmtf
+
+Environment="PATH=/root/lqmtf/venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/root/lqmtf/.env
+
+ExecStart=/root/lqmtf/venv/bin/python main.py live \
+    --auto \
+    --sync \
+    --rescan-every 144 \
+    --risk 1.0 \
+    --heartbeat 8
+
+Restart=always
+RestartSec=60
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lqmtf
+
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
