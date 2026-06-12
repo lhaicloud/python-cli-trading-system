@@ -22,6 +22,7 @@ from app.data.repository import (
 )
 from app.ta.indicators import add_indicators
 from app.ta.signals import generate_signal
+from app.paper.signal_filter import SignalFilter
 from app.backtesting.metrics import compute_metrics
 from app.utils.logger import get_logger
 from app.utils.math_utils import position_size, risk_reward
@@ -29,6 +30,10 @@ from app.ta.leverage import dynamic_leverage
 from app.utils.timeframes import dt_to_ms
 
 logger = get_logger(__name__)
+
+# Tag written to backtest_runs.model_version. Validation (scan_universe)
+# only trusts runs produced by this engine version.
+ENGINE_VERSION = "rule_based_v2_realistic"
 
 _TF_LOOKBACK = {
     "1d":  365,   # candles of lookback for daily
@@ -59,6 +64,8 @@ class OpenTrade:
     ratchet_level:    int    = 0      # ratchet levels activated so far
     ratchet_levels:   list   = field(default_factory=list)
     features:         dict   = field(default_factory=dict)
+    partial_taken:    bool   = False  # 50% closed at +partial_tp_r R
+    partial_pnl:      float  = 0.0    # realized partial PnL (already in capital)
 
 
 def run_backtest(
@@ -108,13 +115,17 @@ def run_backtest(
 
     closed_trades: list[dict] = []
     open_trade: OpenTrade | None = None
+    # Simulated resting limit order (entry refinement) — at most one at a time,
+    # mirroring the one-open-trade rule.
+    pending_order: dict | None = None
     capital = initial_capital
     daily_loss = 0.0
     daily_loss_date = ""
     # Max 96 candles open (48 hours on 30m TF) — stagnating trades exit at close
     MAX_TRADE_CANDLES = 96
-    # Signal generation is checked every 2 candles (once-per-hour resolution).
-    SIGNAL_STEP = 2
+    # Signal generation cadence (candles). Live evaluates every candle close;
+    # default 2 halves runtime at once-per-hour resolution.
+    SIGNAL_STEP = max(1, cfg.backtest_signal_step)
     # Cooldown candles after a stop-loss hit — 20 candles = 10 hours on 30m TF.
     SL_COOLDOWN = 20
     sl_cooldown_remaining = 0
@@ -127,6 +138,10 @@ def run_backtest(
     daily_trades = 0
     blocked_count = 0
     hold_count = 0
+    filtered_count = 0
+    # Same pre-trade quality gate the live watcher runs — without it the
+    # backtest trades a different (looser) strategy than live.
+    sig_filter = SignalFilter()
 
     with Progress(
         SpinnerColumn(),
@@ -169,16 +184,21 @@ def run_backtest(
                     open_trade.mfe = max(open_trade.mfe, open_trade.entry_price - low)
                     open_trade.mae = max(open_trade.mae, high - open_trade.entry_price)
 
-                # Ratchet stop (replaces one-shot breakeven trail)
+                # Ratchet stop (replaces one-shot breakeven trail).
+                # Uses the PREVIOUS candle's extremes: trailing off the current
+                # candle's high/low and then testing the new stop against that
+                # same candle is intra-candle lookahead (the high that justifies
+                # the trail may occur after the low that hits it).
                 if cfg.mtf_ratchet_enabled and open_trade.ratchet_levels:
                     from app.ta.exit_engine import apply_ratchet
-                    atr = float(candle.get("atr_14", 0)) or 1.0
+                    prev = df_30m.iloc[i - 1]
+                    atr = float(prev.get("atr_14", 0)) or 1.0
                     new_sl, new_level = apply_ratchet(
                         direction=open_trade.direction,
                         original_risk=risk,
                         current_sl=open_trade.stop_loss,
-                        candle_high=high,
-                        candle_low=low,
+                        candle_high=float(prev["high"]),
+                        candle_low=float(prev["low"]),
                         atr=atr,
                         ratchet_level=open_trade.ratchet_level,
                         ratchet_levels=open_trade.ratchet_levels,
@@ -194,6 +214,40 @@ def run_backtest(
                     hit_sl = high >= open_trade.stop_loss
                     hit_tp = low <= open_trade.take_profit
 
+                # Partial take-profit at +partial_tp_r R. Skipped when the stop
+                # or the full TP also sits inside this candle (conservative /
+                # the full exit supersedes).
+                if (
+                    cfg.partial_tp_enabled
+                    and not open_trade.partial_taken
+                    and not hit_sl
+                    and not hit_tp
+                    and risk > 0
+                ):
+                    p_target = (
+                        open_trade.entry_price + cfg.partial_tp_r * risk
+                        if open_trade.direction == "BUY"
+                        else open_trade.entry_price - cfg.partial_tp_r * risk
+                    )
+                    p_reached = (
+                        high >= p_target
+                        if open_trade.direction == "BUY"
+                        else low <= p_target
+                    )
+                    if p_reached:
+                        closed_size = open_trade.position_size * cfg.partial_tp_fraction
+                        p_raw = (
+                            (p_target - open_trade.entry_price) * closed_size
+                            if open_trade.direction == "BUY"
+                            else (open_trade.entry_price - p_target) * closed_size
+                        )
+                        p_pnl = p_raw - open_trade.entry_price * closed_size * fee_pct * 2
+                        capital += p_pnl
+                        daily_loss += min(0, p_pnl)
+                        open_trade.position_size -= closed_size
+                        open_trade.partial_taken = True
+                        open_trade.partial_pnl = p_pnl
+
                 # Max duration exit — close stagnating trade at current close price
                 candles_open = i - open_trade.open_candle_idx
                 if candles_open >= MAX_TRADE_CANDLES and not hit_tp and not hit_sl:
@@ -204,11 +258,31 @@ def run_backtest(
                     exit_reason_override = None
 
                 if hit_tp or hit_sl:
+                    if hit_tp and hit_sl and not exit_reason_override:
+                        # Both levels inside one candle — assume the level nearer
+                        # the candle OPEN was struck first; ties go to the stop.
+                        # (The old TP-priority rule was optimistic and inflated
+                        # profit factors.)
+                        open_px = float(candle["open"])
+                        tp_first = (
+                            abs(open_px - open_trade.take_profit)
+                            < abs(open_px - open_trade.stop_loss)
+                        )
+                        hit_tp = tp_first
+
                     exit_price  = open_trade.take_profit if hit_tp and not exit_reason_override else open_trade.stop_loss
                     exit_reason = exit_reason_override if exit_reason_override else (
                         "tp_hit" if hit_tp else
                         ("ratchet_sl" if open_trade.ratchet_level > 0 else "sl_hit")
                     )
+
+                    # Stop-type exits are market orders — apply adverse slippage.
+                    # TP exits are resting limit orders (no slippage).
+                    if exit_reason != "tp_hit":
+                        if open_trade.direction == "BUY":
+                            exit_price *= (1 - slippage_pct)
+                        else:
+                            exit_price *= (1 + slippage_pct)
 
                     if open_trade.direction == "BUY":
                         raw_pnl = (exit_price - open_trade.entry_price) * open_trade.position_size
@@ -217,11 +291,14 @@ def run_backtest(
 
                     # Fee on notional value (entry + exit), not on P&L
                     fee = open_trade.entry_price * open_trade.position_size * fee_pct * 2
-                    pnl = raw_pnl - fee
+                    pnl_increment = raw_pnl - fee
+                    # Total trade PnL includes any partial TP already realized;
+                    # capital only takes the increment (partial added earlier).
+                    pnl = pnl_increment + open_trade.partial_pnl
                     pnl_pct = pnl / capital * 100
 
-                    capital += pnl
-                    daily_loss += min(0, pnl)
+                    capital += pnl_increment
+                    daily_loss += min(0, pnl_increment)
 
                     closed_trades.append({
                         "symbol":                  symbol,
@@ -250,8 +327,55 @@ def run_backtest(
                         sl_cooldown_remaining = SL_COOLDOWN
                     open_trade = None
 
+            # ── Pending limit order: fill or expire ─────────────────────────
+            # Fills are checked from the candle AFTER placement (the signal
+            # fired at this candle's open; same-candle fills would be
+            # optimistic). Limit fills execute at the limit price — no
+            # market slippage.
+            if pending_order is not None and open_trade is None:
+                if i >= pending_order["expiry_idx"]:
+                    pending_order = None
+                elif i > pending_order["placed_idx"]:
+                    limit = pending_order["limit_price"]
+                    touched = (
+                        float(candle["low"]) <= limit
+                        if pending_order["direction"] == "BUY"
+                        else float(candle["high"]) >= limit
+                    )
+                    if touched:
+                        daily_trades += 1
+                        from app.ta.exit_engine import build_ratchet_levels
+                        ratchet_lvls = (
+                            build_ratchet_levels(
+                                limit, pending_order["stop_loss"],
+                                pending_order["direction"],
+                            )
+                            if cfg.mtf_ratchet_enabled else []
+                        )
+                        open_trade = OpenTrade(
+                            direction=pending_order["direction"],
+                            entry_price=round(limit, 4),
+                            stop_loss=pending_order["stop_loss"],
+                            take_profit=pending_order["take_profit"],
+                            position_size=pending_order["position_size"],
+                            entry_time=candle_time,
+                            original_sl=pending_order["stop_loss"],
+                            open_candle_idx=i,
+                            ratchet_level=0,
+                            ratchet_levels=ratchet_lvls,
+                            signal_confidence=pending_order["signal_confidence"],
+                            zone_score=pending_order["zone_score"],
+                            setup_type=pending_order["setup_type"],
+                            features=pending_order["features"],
+                        )
+                        pending_order = None
+                        progress.advance(task)
+                        continue
+
             # ── SL cooldown gate ────────────────────────────────────────────
             if sl_cooldown_remaining > 0:
+                # A stop-out also cancels any resting order
+                pending_order = None
                 sl_cooldown_remaining -= 1
                 progress.advance(task)
                 continue
@@ -267,8 +391,8 @@ def run_backtest(
                 progress.advance(task)
                 continue
 
-            # ── Only one open trade at a time ───────────────────────────────
-            if open_trade is not None:
+            # ── Only one open trade / pending order at a time ───────────────
+            if open_trade is not None or pending_order is not None:
                 progress.advance(task)
                 continue
 
@@ -312,18 +436,42 @@ def run_backtest(
                 progress.advance(task)
                 continue
 
+            # Live-parity quality gate — the exact filter pipeline the live
+            # watcher applies before opening a trade (zone rating, daily bias,
+            # premium/discount, regime, time-of-day, candle rejection, ...).
+            passed, _filter_reason = sig_filter.evaluate(
+                sig, now_ms=candle_time, df_30m=hist_30m
+            )
+            if not passed:
+                filtered_count += 1
+                progress.advance(task)
+                continue
+
             # Trap-zone gate: large wicks + high volume = failed breakout conditions.
             # These signals need much stronger conviction to trade through.
             if sig.market_regime == "trap_zone" and sig.confidence < 80.0:
                 progress.advance(task)
                 continue
 
-            # Apply slippage to entry
+            # ── Limit-or-market entry ───────────────────────────────────────
+            # Same rule as PositionManager.submit(): if price still needs to
+            # retrace to the signal's entry level, rest a limit there instead
+            # of chasing at market.
+            cur_px = float(hist_30m["close"].iloc[-1])
+            gap = cfg.entry_limit_min_gap_pct / 100
+            needs_retrace = cfg.entry_limit_enabled and cur_px > 0 and (
+                sig.entry_price < cur_px * (1 - gap)
+                if sig.signal == "BUY"
+                else sig.entry_price > cur_px * (1 + gap)
+            )
+
+            # Market entries pay slippage; limit fills execute at the limit
             entry = sig.entry_price
-            if sig.signal == "BUY":
-                entry *= (1 + slippage_pct)
-            else:
-                entry *= (1 - slippage_pct)
+            if not needs_retrace:
+                if sig.signal == "BUY":
+                    entry *= (1 + slippage_pct)
+                else:
+                    entry *= (1 - slippage_pct)
 
             # ── Zone blacklist gate ─────────────────────────────────────────
             entry_zone_key = round(entry / 100) * 100
@@ -337,6 +485,48 @@ def run_backtest(
             pos_size = position_size(capital, risk_pct, entry, sig.stop_loss,
                                      leverage=lev)
             if pos_size <= 0 or sig.risk_reward < cfg.min_rr_ratio:
+                progress.advance(task)
+                continue
+
+            entry_features = {
+                    "signal":           sig.signal,
+                    "h4_bias":          sig.h4_bias,
+                    "h1_confirmation":  sig.h1_confirmation,
+                    "zone_score":       sig.zone_score,
+                    "liquidity_sweep":  int(sig.liquidity_sweep),
+                    "premium_discount": sig.premium_discount,
+                    "risk_reward":      sig.risk_reward,
+                    "market_regime":    sig.market_regime,
+                    # Rule-engine-derived indicators
+                    "rsi_14":           float(hist_30m["rsi_14"].iloc[-1]) if "rsi_14" in hist_30m.columns else 50.0,
+                    "volume_ratio":     _vol_ratio(hist_30m),
+                    "above_ema50":      int(float(hist_30m["above_ema50"].iloc[-1])) if "above_ema50" in hist_30m.columns else 0,
+                    "above_ema200":     int(float(hist_30m["above_ema200"].iloc[-1])) if "above_ema200" in hist_30m.columns else 0,
+                    "body_atr_ratio":   float(hist_30m["body_atr_ratio"].iloc[-1]) if "body_atr_ratio" in hist_30m.columns else 1.0,
+                    "atr_expansion":    _atr_expansion(hist_30m),
+                    "ema_alignment":    _ema_alignment(hist_30m),
+                    "price_velocity":   _price_velocity(hist_30m),
+                    # Raw independent features (now stored so models can learn from them)
+                    "roc_10":           _roc_n(hist_30m, 10),
+                    "roc_20":           _roc_n(hist_30m, 20),
+                    "vol_trend":        _vol_trend_slope(hist_30m),
+                    "htf_rsi_daily":    float(hist_1d["rsi_14"].iloc[-1]) if not hist_1d.empty and "rsi_14" in hist_1d.columns else 50.0,
+            }
+
+            if needs_retrace:
+                pending_order = {
+                    "direction":         sig.signal,
+                    "limit_price":       round(sig.entry_price, 4),
+                    "stop_loss":         sig.stop_loss,
+                    "take_profit":       sig.take_profit,
+                    "position_size":     round(pos_size, 6),
+                    "signal_confidence": sig.confidence,
+                    "zone_score":        sig.zone_score,
+                    "setup_type":        sig.setup_type,
+                    "features":          entry_features,
+                    "placed_idx":        i,
+                    "expiry_idx":        i + cfg.entry_limit_expiry_candles,
+                }
                 progress.advance(task)
                 continue
 
@@ -360,30 +550,7 @@ def run_backtest(
                 signal_confidence=sig.confidence,
                 zone_score=sig.zone_score,
                 setup_type=sig.setup_type,
-                features={
-                    "signal":           sig.signal,
-                    "h4_bias":          sig.h4_bias,
-                    "h1_confirmation":  sig.h1_confirmation,
-                    "zone_score":       sig.zone_score,
-                    "liquidity_sweep":  int(sig.liquidity_sweep),
-                    "premium_discount": sig.premium_discount,
-                    "risk_reward":      sig.risk_reward,
-                    "market_regime":    sig.market_regime,
-                    # Rule-engine-derived indicators
-                    "rsi_14":           float(hist_30m["rsi_14"].iloc[-1]) if "rsi_14" in hist_30m.columns else 50.0,
-                    "volume_ratio":     _vol_ratio(hist_30m),
-                    "above_ema50":      int(float(hist_30m["above_ema50"].iloc[-1])) if "above_ema50" in hist_30m.columns else 0,
-                    "above_ema200":     int(float(hist_30m["above_ema200"].iloc[-1])) if "above_ema200" in hist_30m.columns else 0,
-                    "body_atr_ratio":   float(hist_30m["body_atr_ratio"].iloc[-1]) if "body_atr_ratio" in hist_30m.columns else 1.0,
-                    "atr_expansion":    _atr_expansion(hist_30m),
-                    "ema_alignment":    _ema_alignment(hist_30m),
-                    "price_velocity":   _price_velocity(hist_30m),
-                    # Raw independent features (now stored so models can learn from them)
-                    "roc_10":           _roc_n(hist_30m, 10),
-                    "roc_20":           _roc_n(hist_30m, 20),
-                    "vol_trend":        _vol_trend_slope(hist_30m),
-                    "htf_rsi_daily":    float(hist_1d["rsi_14"].iloc[-1]) if not hist_1d.empty and "rsi_14" in hist_1d.columns else 50.0,
-                },
+                features=entry_features,
             )
             progress.advance(task)
 
@@ -396,7 +563,7 @@ def run_backtest(
         else:
             raw_pnl = (open_trade.entry_price - last_close) * open_trade.position_size
         fee = open_trade.entry_price * open_trade.position_size * fee_pct * 2
-        pnl = raw_pnl - fee
+        pnl = raw_pnl - fee + open_trade.partial_pnl
         closed_trades.append({
             "symbol":                  symbol,
             "direction":               open_trade.direction,
@@ -421,6 +588,7 @@ def run_backtest(
     metrics = compute_metrics(closed_trades, initial_capital)
     metrics["blocked_count"] = blocked_count
     metrics["hold_count"] = hold_count
+    metrics["filtered_count"] = filtered_count
 
     # Persist results
     run_id = save_backtest_run({
@@ -435,7 +603,10 @@ def run_backtest(
         "max_drawdown":    metrics["max_drawdown_pct"],
         "net_profit":      metrics["net_profit"],
         "metrics":         metrics,
-        "model_version":   "rule_based_v1",
+        # v2: conservative same-candle SL/TP, prev-candle ratchet, exit
+        # slippage, live SignalFilter parity. Distinguishes runs from the
+        # older optimistic engine in backtest_runs.
+        "model_version":   ENGINE_VERSION,
     })
 
     for t in closed_trades:

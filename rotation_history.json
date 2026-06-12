@@ -49,6 +49,16 @@
         "SUIUSDT",
         "DOTUSDT"
       ]
+    },
+    {
+      "date": "2026-06-12",
+      "coins": [
+        "LTCUSDT",
+        "ADAUSDT",
+        "UNIUSDT",
+        "AVAXUSDT",
+        "NEARUSDT"
+      ]
     }
   ]
 }

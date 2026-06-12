@@ -88,9 +88,14 @@ def position_size(
     leverage > 1 scales the position up proportionally so notional exposure
     is leverage× larger while margin posted = notional / leverage.
     Effective capital at risk per trade = risk_pct × leverage %.
+
+    Notional is capped at capital × leverage: a tight stop cannot buy more
+    exposure than the account could actually post margin for (1× = spot-like).
     """
     risk_amount = capital * (risk_pct / 100)
     price_risk  = abs(entry - sl)
-    if price_risk == 0:
+    if price_risk == 0 or entry <= 0:
         return 0.0
-    return (risk_amount / price_risk) * max(1, int(leverage))
+    units = (risk_amount / price_risk) * max(1, int(leverage))
+    max_units = capital * max(1, int(leverage)) / entry
+    return min(units, max_units)

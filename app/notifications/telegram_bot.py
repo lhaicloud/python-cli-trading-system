@@ -310,19 +310,14 @@ class TelegramCommandListener:
     # ── ⚠️ Risk Stats ─────────────────────────────────────────────────────────
 
     def _cmd_risk_stats(self, chat_id: str) -> None:
-        from app.data.repository import get_open_paper_trades
-        from app.paper.account import get_paper_capital
-        from app.data.repository import get_candles
+        from app.data.repository import get_all_open_paper_trades
+        from app.paper.account import get_portfolio_capital
 
-        symbols   = self._watcher.symbols
         max_total = 3  # _MAX_PORTFOLIO_TRADES
         max_dir   = 2  # _MAX_SAME_DIRECTION
 
-        all_open  = []
-        for sym in symbols:
-            for t in get_open_paper_trades(sym):
-                t["symbol"] = sym
-                all_open.append(t)
+        # DB-wide, matching the PositionManager guards (cross-process safe)
+        all_open = get_all_open_paper_trades()
 
         buys  = [t for t in all_open if t.get("direction") == "BUY"]
         sells = [t for t in all_open if t.get("direction") == "SELL"]
@@ -338,14 +333,14 @@ class TelegramCommandListener:
             risk = abs(entry - sl) * size if entry and sl and size else 0
             total_at_risk += risk
 
-        total_cap = sum(get_paper_capital(s) for s in symbols)
+        total_cap = get_portfolio_capital()
 
         lines = [
             "⚠️ <b>Risk Stats</b>\n",
             f"Open trades: <b>{len(all_open)}</b> / {max_total} cap",
             f"  🟢 BUYs:  {len(buys)} / {max_dir} cap",
             f"  🔴 SELLs: {len(sells)} / {max_dir} cap",
-            f"\nTotal capital: <b>${total_cap:,.2f}</b>",
+            f"\nPortfolio equity: <b>${total_cap:,.2f}</b>",
             f"Capital at risk: <b>${total_at_risk:,.2f}</b>",
         ]
 
@@ -505,16 +500,17 @@ class TelegramCommandListener:
     # ── 💰 Capital ────────────────────────────────────────────────────────────
 
     def _cmd_capital(self, chat_id: str) -> None:
-        from app.paper.account import get_paper_capital
+        from app.paper.account import get_paper_capital, get_portfolio_capital
 
         symbols = self._watcher.symbols
         lines   = ["💰 <b>Paper Capital</b>\n"]
-        total   = 0.0
+        lines.append(
+            f"  <b>Portfolio equity:</b> <code>${get_portfolio_capital():,.2f}</code>"
+            f"  (sizing basis)\n"
+        )
+        lines.append("  Per-symbol ledgers:")
         for sym in symbols:
-            cap = get_paper_capital(sym)
-            total += cap
-            lines.append(f"  <b>{sym}</b>: <code>${cap:,.2f}</code>")
-        lines.append(f"\n  <b>Total:</b> <code>${total:,.2f}</code>")
+            lines.append(f"    <b>{sym}</b>: <code>${get_paper_capital(sym):,.2f}</code>")
         self._send(chat_id, "\n".join(lines))
 
     # ── ❤️ Status ─────────────────────────────────────────────────────────────

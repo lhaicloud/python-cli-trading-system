@@ -85,7 +85,12 @@ def main():
         if args.dry_run:
             cmd.append("--dry-run")
 
-        env = {**__import__("os").environ, "PYTHONIOENCODING": "utf-8"}
+        env = {
+            **os.environ,
+            "PYTHONIOENCODING": "utf-8",
+            # Only one child may long-poll Telegram getUpdates (409 otherwise)
+            "TELEGRAM_LISTENER": "1" if sym == SYMBOLS[0] else "0",
+        }
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -127,7 +132,11 @@ def main():
                         cmd += ["--capital", str(args.capital)]
                     if args.dry_run:
                         cmd.append("--dry-run")
-                    env = {**__import__("os").environ, "PYTHONIOENCODING": "utf-8"}
+                    env = {
+                        **os.environ,
+                        "PYTHONIOENCODING": "utf-8",
+                        "TELEGRAM_LISTENER": "1" if sym == SYMBOLS[0] else "0",
+                    }
                     new_proc = subprocess.Popen(
                         cmd,
                         stdout=subprocess.PIPE,

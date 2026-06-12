@@ -15,6 +15,7 @@ Run:
 from __future__ import annotations
 
 import dataclasses
+import os
 import signal as _signal
 import threading
 import time
@@ -36,7 +37,7 @@ from app.notifications.telegram import (
     notify_signal,
     send_message,
 )
-from app.paper.account import get_paper_capital, update_capital_after_trade, set_paper_capital
+from app.paper.account import get_paper_capital, get_portfolio_capital, set_paper_capital
 from app.paper.position_manager import PositionManager
 from app.paper.signal_filter import SignalFilter
 from app.live.price_monitor import PriceMonitor
@@ -97,6 +98,9 @@ class LiveWatcher:
         sync:             bool  = False,
         sync_top:         int   = 50,
         sync_min_volume:  float = 50_000_000,
+        telegram_listener: bool = True,
+        rescan_pool:      list[str] | None = None,
+        rotation_history_file: str | None = None,
     ) -> None:
         self.symbols           = [s.upper() for s in symbols]
         self.exec_tf           = exec_timeframe
@@ -114,6 +118,10 @@ class LiveWatcher:
         self._sync             = sync
         self._sync_top         = sync_top
         self._sync_min_volume  = sync_min_volume
+        self._telegram_listener = telegram_listener
+        self._rescan_pool      = [s.upper() for s in rescan_pool] if rescan_pool else None
+        self._rotation_history_file = rotation_history_file
+        self._last_digest_date = time.strftime("%Y-%m-%d", time.gmtime())
 
         if paper_capital is not None:
             for sym in self.symbols:
@@ -126,6 +134,7 @@ class LiveWatcher:
             symbols          = self.symbols,
             position_manager = self._pm,
             on_trade_closed  = self._on_monitor_close,
+            on_order_filled  = self._on_monitor_fill,
         )
 
         if stop_event is None:
@@ -179,13 +188,32 @@ class LiveWatcher:
         pnl    = trade.get("pnl", 0)
         status = trade.get("status", "closed")
         color  = "green" if pnl >= 0 else "red"
-        update_capital_after_trade(symbol, pnl)
+        # Capital already updated by PositionManager._evaluate — do not update again here
         console.print(
             f"  [{color}][PriceMonitor] Trade CLOSED ({status.replace('_', ' ')}) "
             f"{symbol}  PnL={'+'if pnl>=0 else ''}{pnl:.2f}[/{color}]"
         )
         lev = int(trade.get("leverage") or 1)
         notify_trade_closed(trade, symbol, leverage=lev)
+
+    def _on_monitor_fill(self, order: dict, trade_id: int, symbol: str) -> None:
+        """Called by PriceMonitor when a pending limit order fills intrabar."""
+        console.print(
+            f"  [green][PriceMonitor] Limit order FILLED  {symbol} "
+            f"{order.get('direction')} @ {order.get('limit_price')}[/green]"
+        )
+        notify_trade_opened(
+            {
+                "direction":     order.get("direction"),
+                "entry_price":   order.get("limit_price"),
+                "stop_loss":     order.get("stop_loss"),
+                "take_profit":   order.get("take_profit"),
+                "risk_reward":   order.get("risk_reward"),
+                "position_size": 0.0,
+            },
+            symbol,
+            leverage=1,
+        )
 
     # ── Public entry point ────────────────────────────────────────────────────
 
@@ -218,9 +246,15 @@ class LiveWatcher:
 
         # Start background threads
         self._monitor.start()
-        from app.notifications.telegram_bot import TelegramCommandListener
-        _bot = TelegramCommandListener(self)
-        _bot.start()
+        # Only one listener may long-poll Telegram getUpdates per bot token —
+        # concurrent pollers get HTTP 409. run_live_paper.py sets
+        # TELEGRAM_LISTENER=0 for all but one child process; run_live_rotation.py
+        # passes telegram_listener=False for all but one watcher thread.
+        _bot = None
+        if self._telegram_listener and os.environ.get("TELEGRAM_LISTENER", "1") != "0":
+            from app.notifications.telegram_bot import TelegramCommandListener
+            _bot = TelegramCommandListener(self)
+            _bot.start()
 
         try:
             while not self._is_stopped():
@@ -233,7 +267,8 @@ class LiveWatcher:
                 self._run_cycle(target_ms)
         finally:
             self._monitor.stop()
-            _bot.stop()
+            if _bot is not None:
+                _bot.stop()
 
         console.print("\n\n  [dim]Live watcher stopped.[/dim]\n")
 
@@ -275,6 +310,7 @@ class LiveWatcher:
                 validated_only=self._rescan_validated,
                 fallback_symbols=self.symbols,
                 verbose=True,
+                pool=self._rescan_pool,
             )
             if new_symbols == self.symbols:
                 console.print("  [dim][Rescan] Watchlist unchanged.[/dim]")
@@ -315,8 +351,28 @@ class LiveWatcher:
                 console.print(
                     f"  [cyan][Rescan] Watchlist: +{added or 'none'}  -{removed or 'none'}[/cyan]"
                 )
+                self._record_rotation_history(new_symbols)
         except Exception as exc:
             console.print(f"  [yellow][Rescan] Error: {exc} — keeping current symbols[/yellow]")
+
+    def _record_rotation_history(self, coins: list[str]) -> None:
+        """Append/refresh today's watchlist in rotation_history.json (audit only)."""
+        if not self._rotation_history_file:
+            return
+        try:
+            import json
+            import os
+            history = []
+            if os.path.exists(self._rotation_history_file):
+                with open(self._rotation_history_file, encoding="utf-8") as f:
+                    history = json.load(f).get("history", [])
+            today = time.strftime("%Y-%m-%d", time.gmtime())
+            history = [h for h in history if h.get("date") != today]
+            history.append({"date": today, "coins": list(coins)})
+            with open(self._rotation_history_file, "w", encoding="utf-8") as f:
+                json.dump({"history": history[-30:]}, f, indent=2)
+        except Exception as exc:
+            logger.warning("[Live] Could not write rotation history: %s", exc)
 
     def _run_cycle(self, candle_time_ms: int) -> None:
         self._maybe_rescan()
@@ -345,6 +401,57 @@ class LiveWatcher:
 
         if self.heartbeat_every > 0 and self._cycle % self.heartbeat_every == 0:
             self._send_heartbeat(candle_dt, cycle_signals)
+
+        self._maybe_send_daily_digest()
+
+    def _maybe_send_daily_digest(self) -> None:
+        """Once per UTC day: equity, 24h realized PnL, position aging, data freshness."""
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        if today == self._last_digest_date:
+            return
+        self._last_digest_date = today
+        try:
+            from app.data.repository import get_closed_pnl_since
+            now_ms  = int(time.time() * 1000)
+            pnl_24h = get_closed_pnl_since(now_ms - 24 * 3_600_000)
+            equity  = get_portfolio_capital()
+
+            lines = [
+                f"\U0001f4c5 <b>Daily Digest</b>  {today}",
+                f"Equity: <b>${equity:,.2f}</b>",
+                f"Realized 24h: {'+' if pnl_24h >= 0 else ''}{pnl_24h:,.2f}",
+            ]
+            open_trades = self._pm.all_open_trades()
+            if open_trades:
+                lines.append(f"Open positions: {len(open_trades)}")
+                for t in open_trades:
+                    age_h = (now_ms - int(t.get("open_time") or now_ms)) / 3_600_000
+                    upnl = float(t.get("pnl") or 0)
+                    lines.append(
+                        f"  • {t.get('symbol','?')} {t.get('direction','?')} "
+                        f"({age_h:.0f}h)  uPnL {'+' if upnl >= 0 else ''}{upnl:.2f}"
+                    )
+            pending = [o for s in self.symbols for o in self._pm.pending_orders(s)]
+            if pending:
+                lines.append(f"Pending limit orders: {len(pending)}")
+
+            # Data freshness per watched symbol
+            stale = []
+            from app.db.connection import get_conn
+            with get_conn() as conn:
+                for sym in self.symbols:
+                    row = conn.execute(
+                        "SELECT MAX(open_time) FROM candles WHERE symbol=? AND timeframe='30m'",
+                        (sym,),
+                    ).fetchone()
+                    if row and row[0] and now_ms - int(row[0]) > 2 * 3_600_000:
+                        stale.append(sym)
+            if stale:
+                lines.append(f"⚠ Stale 30m candles: {', '.join(stale)}")
+
+            send_message("\n".join(lines))
+        except Exception as exc:
+            logger.warning("[Live] Daily digest failed: %s", exc)
 
     # ── Single symbol within a cycle ─────────────────────────────────────────
 
@@ -393,7 +500,17 @@ class LiveWatcher:
         console.print(f"  Price: [bold yellow]{current_price:,.4f}[/bold yellow]  "
                       f"[dim]H={candle_high:,.4f}  L={candle_low:,.4f}[/dim]")
 
-        # 3. Check open trades using candle high/low (intrabar SL/TP)
+        # 3a. Fill/expire pending limit orders against the candle range
+        for ev in self._pm.check_pending(symbol, candle_high, candle_low):
+            if ev["outcome"] == "filled":
+                self._on_monitor_fill(ev["order"], ev["trade_id"], symbol)
+            else:
+                console.print(
+                    f"  [yellow]Pending order #{ev['order']['id']} "
+                    f"{ev['outcome']}[/yellow]"
+                )
+
+        # 3b. Check open trades using candle high/low (intrabar SL/TP)
         closed = self._pm.check_candle(symbol, candle_high, candle_low, current_price)
         for t in closed:
             pnl    = t.get("pnl", 0)
@@ -445,13 +562,22 @@ class LiveWatcher:
             )
             notify_signal(sig, leverage=_lev)
 
-        # 7. SignalFilter + open trade
+        # 7. SignalFilter + submit (limit-or-market entry)
         if sig.signal in ("BUY", "SELL") and not self.dry_run:
             passed, reason = self._filter.evaluate(sig)
             if not passed:
                 console.print(f"  [yellow]Signal filtered: {reason}[/yellow]")
             else:
-                trade_id = self._pm.open(symbol, sig, capital, signal_id)
+                outcome, oid = self._pm.submit(
+                    symbol, sig, capital, signal_id, current_price=current_price
+                )
+                if outcome == "pending":
+                    console.print(
+                        f"  [cyan]Limit order #{oid} placed  "
+                        f"{sig.signal} @ {sig.entry_price:.4f} "
+                        f"(price now {current_price:.4f})[/cyan]"
+                    )
+                trade_id = oid if outcome == "opened" else None
                 if trade_id:
                     opened = self._pm.open_trades(symbol)
                     pos_size = float(opened[0]["position_size"]) if opened else 0.0
@@ -533,7 +659,10 @@ class LiveWatcher:
                 f"Leverage={'[bold]' + str(_lev) + '×[/bold]' if _lev > 1 else '1×'}  "
                 f"Setup={sig.setup_type}"
             )
-        console.print(f"  Capital: [bold green]${capital:,.2f}[/bold green]")
+        console.print(
+            f"  Equity: [bold green]${get_portfolio_capital():,.2f}[/bold green]  "
+            f"[dim]({symbol} ledger: ${capital:,.2f})[/dim]"
+        )
 
     def _send_heartbeat(
         self,

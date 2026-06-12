@@ -23,25 +23,33 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app.backtesting.engine import ENGINE_VERSION
 from app.config import get_settings
-from app.data.repository import get_candles, get_active_model, get_active_zones
+from app.data.repository import get_candles, get_active_model
 from app.db.connection import get_conn
 from app.ta.indicators import add_indicators
 from app.ta.mtf_scorer import run_prefilter
 from app.ta.regime import classify_regime
+from app.ta.zones import detect_zones
 
 cfg = get_settings()
 
+# Aligned with the live SignalFilter: distribution entries are BLOCKED there,
+# so a coin in distribution must not look attractive to the rotation.
 REGIME_RANK = {
     "bullish_trend":              5,
     "bearish_trend":              5,
     "accumulation":               4,
-    "distribution":               4,
+    "distribution":               0,
     "trap_zone":                  3,
     "squeeze":                    1,
     "high_volatility_liquidation":1,
     "choppy":                     0,
 }
+
+# A symbol is "validated" when it has at least this many profitable runs
+# from the CURRENT engine version (old optimistic-engine runs don't count).
+MIN_PROFITABLE_RUNS = 1
 
 MIN_30M_CANDLES = 5_000   # ~3 months of 30m bars
 
@@ -51,15 +59,18 @@ MIN_30M_CANDLES = 5_000   # ~3 months of 30m bars
 def scan_and_rank(
     validated_only: bool = False,
     verbose: bool = False,
+    pool: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Scan all DB symbols and return a ranked list by conviction score.
 
     Parameters
     ----------
-    validated_only : If True, only include symbols that have at least one
-                     profitable backtest run in the DB.
+    validated_only : If True, only include symbols with >= MIN_PROFITABLE_RUNS
+                     profitable backtest runs from the current engine version.
     verbose        : Print per-symbol status as scanning progresses.
+    pool           : Optional whitelist — only scan these symbols (e.g. the
+                     curated rotation pool from coin_pool.json).
 
     Returns
     -------
@@ -77,11 +88,11 @@ def scan_and_rank(
             ORDER BY symbol
         """, (MIN_30M_CANDLES,)).fetchall()
 
-        # Backtest run history per symbol.
+        # Backtest run history per symbol — CURRENT engine version only.
+        # Runs from the old optimistic engine (rule_based_v1) had inflated
+        # profit factors and don't count as validation.
         # A run counts as "profitable" only when it passes all three thresholds:
         # net_profit > min_profit, win_rate >= min_win_rate, total_trades >= min_trades.
-        # This prevents near-zero results (e.g. $0.90 on $10k) from masquerading
-        # as validated performance.
         _c = cfg
         bt_stats = {
             r[0]: {"runs": r[1], "profitable": r[2]}
@@ -91,13 +102,22 @@ def scan_and_rank(
                                  AND win_rate   >= ?
                                  AND total_trades >= ?
                             THEN 1 ELSE 0 END) as profitable
-                FROM backtest_runs GROUP BY symbol
-            """, (_c.backtest_min_profit, _c.backtest_min_win_rate, _c.backtest_min_trades)).fetchall()
+                FROM backtest_runs
+                WHERE model_version = ?
+                GROUP BY symbol
+            """, (_c.backtest_min_profit, _c.backtest_min_win_rate,
+                  _c.backtest_min_trades, ENGINE_VERSION)).fetchall()
         }
 
     symbols = [r[0] for r in rows]
+    if pool:
+        pool_set = {s.upper() for s in pool}
+        symbols = [s for s in symbols if s in pool_set]
     if validated_only:
-        symbols = [s for s in symbols if bt_stats.get(s, {}).get("profitable", 0) >= 2]
+        symbols = [
+            s for s in symbols
+            if bt_stats.get(s, {}).get("profitable", 0) >= MIN_PROFITABLE_RUNS
+        ]
 
     results  = []
 
@@ -131,8 +151,11 @@ def scan_and_rank(
                         else ("buy" if has_buy else ("sell" if has_sell else "—")))
 
             current_price = float(df_30m["close"].iloc[-1])
-            all_zones     = (get_active_zones(sym, "30m", zone_type="demand")
-                             + get_active_zones(sym, "30m", zone_type="supply"))
+            # Zones are computed on the fly (same calls as generate_signal) —
+            # the `zones` DB table is never populated, so reading it back
+            # made this score component permanently zero.
+            all_zones     = (detect_zones(df_30m, lookback=300, timeframe="30m")
+                             + detect_zones(df_4h,  lookback=200, timeframe="4h"))
 
             zone_near       = False
             nearest_zone_pct = None
@@ -207,11 +230,13 @@ def auto_backtest_new_symbols(
     """
     from app.backtesting.engine import run_backtest
 
-    # Symbols that have been backtested at least once
+    # Symbols already tested by the CURRENT engine version. Coins that were
+    # only validated by the old optimistic engine get re-tested.
     with get_conn() as conn:
         tested = {
             r[0] for r in conn.execute(
-                "SELECT DISTINCT symbol FROM backtest_runs"
+                "SELECT DISTINCT symbol FROM backtest_runs WHERE model_version = ?",
+                (ENGINE_VERSION,),
             ).fetchall()
         }
         # Symbols with enough candle data to backtest
@@ -278,6 +303,7 @@ def select_watchlist(
     validated_only: bool = True,
     fallback_symbols: list[str] | None = None,
     verbose: bool = True,
+    pool: list[str] | None = None,
 ) -> list[str]:
     """
     Return symbols to watch, chosen by conviction score.
@@ -286,9 +312,14 @@ def select_watchlist(
     ----------
     n                : Max symbols to return. 0 (default) = all that pass
                        the validation filter, no artificial cap.
-    validated_only   : Only consider symbols with >= 2 profitable backtest runs.
-    fallback_symbols : Used when n > 0 and scanner finds fewer than N validated
-                       symbols. Ignored when n == 0.
+    validated_only   : Prefer symbols with >= MIN_PROFITABLE_RUNS profitable
+                       runs from the current engine version.
+    fallback_symbols : Used when n > 0, no pool is given, and the scanner
+                       finds fewer than N symbols. Ignored when n == 0.
+    pool             : Optional whitelist (rotation pool). When set, the scan
+                       is restricted to the pool and any padding comes from
+                       the highest-conviction UNVALIDATED pool coins instead
+                       of hardcoded fallbacks.
     verbose          : Print scanner output.
 
     Returns
@@ -297,25 +328,45 @@ def select_watchlist(
     """
     label = "all" if n == 0 else f"top {n}"
     if verbose:
-        print(f"  [Scanner] Scanning universe for {label} symbols"
+        print(f"  [Scanner] Scanning {'pool' if pool else 'universe'} for {label} symbols"
               + (" (validated only)" if validated_only else "") + "...")
 
-    ranked = scan_and_rank(validated_only=validated_only, verbose=verbose)
+    if pool:
+        # One scan of the whole pool; partition by validation so padding
+        # comes from the same conviction ranking.
+        ranked = scan_and_rank(validated_only=False, verbose=verbose, pool=pool)
+        if validated_only:
+            validated   = [r for r in ranked if r["profitable_runs"] >= MIN_PROFITABLE_RUNS]
+            unvalidated = [r for r in ranked if r["profitable_runs"] < MIN_PROFITABLE_RUNS]
+        else:
+            validated, unvalidated = ranked, []
 
-    if n == 0:
-        # Return every symbol that passed the filter — no artificial cap
-        selected = [r["symbol"] for r in ranked]
-    else:
-        selected = [r["symbol"] for r in ranked[:n]]
-        # Pad with fallback symbols only when a hard cap is set
-        fallback = list(fallback_symbols or ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"])
-        for sym in fallback:
-            if len(selected) >= n:
-                break
-            if sym not in selected:
-                selected.append(sym)
+        if n == 0:
+            selected = [r["symbol"] for r in validated]
+        else:
+            selected = [r["symbol"] for r in validated[:n]]
+            for r in unvalidated:
+                if len(selected) >= n:
+                    break
+                selected.append(r["symbol"])
                 if verbose:
-                    print(f"  [Scanner] Padded with fallback: {sym}")
+                    print(f"  [Scanner] Padded with unvalidated pool coin: {r['symbol']}")
+    else:
+        ranked = scan_and_rank(validated_only=validated_only, verbose=verbose)
+        if n == 0:
+            # Return every symbol that passed the filter — no artificial cap
+            selected = [r["symbol"] for r in ranked]
+        else:
+            selected = [r["symbol"] for r in ranked[:n]]
+            # Pad with fallback symbols only when a hard cap is set
+            fallback = list(fallback_symbols or ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"])
+            for sym in fallback:
+                if len(selected) >= n:
+                    break
+                if sym not in selected:
+                    selected.append(sym)
+                    if verbose:
+                        print(f"  [Scanner] Padded with fallback: {sym}")
 
     if verbose:
         print(f"  [Scanner] Selected watchlist ({len(selected)}): {selected}")

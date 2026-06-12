@@ -446,8 +446,6 @@ def paper(
     console.print(f"  Capital: ${result['capital']:,.2f}")
     if result["trade_opened"]:
         console.print(f"  [green]Trade opened: #{result['trade_opened']}[/green]")
-    if result.get("pending_order"):
-        console.print(f"  [cyan]Limit order placed: #{result['pending_order']}[/cyan]")
     if result["closed_trades"]:
         for t in result["closed_trades"]:
             pnl = t.get("pnl", 0)
@@ -486,7 +484,7 @@ def close_all(
     with get_conn() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT id, symbol, direction, entry_price, position_size, partial_pnl "
+            "SELECT id, symbol, direction, entry_price, position_size "
             "FROM paper_trades WHERE status='open'"
         ).fetchall()
 
@@ -512,10 +510,7 @@ def close_all(
 
         raw_pnl = (entry - cp) * pos_size if direction == "SELL" else (cp - entry) * pos_size
         fee     = entry * pos_size * fee_rate * 2
-        pnl_increment = round(raw_pnl - fee, 2)
-        # Total trade PnL includes any partial TP already realized; only the
-        # increment goes to capital (the partial was applied when taken).
-        pnl     = round(pnl_increment + float(row["partial_pnl"] or 0), 2)
+        pnl     = round(raw_pnl - fee, 2)
         capital = get_paper_capital(sym)
         pnl_pct = round(pnl / capital * 100, 4) if capital > 0 else 0.0
         total_pnl += pnl
@@ -530,7 +525,7 @@ def close_all(
 
         if not dry_run:
             close_paper_trade(tid, cp, now_ms, pnl, pnl_pct, "closed")
-            update_capital_after_trade(sym, pnl_increment)
+            update_capital_after_trade(sym, pnl)
 
     color = "green" if total_pnl >= 0 else "red"
     label = "Would realise" if dry_run else "Total realised"
@@ -667,20 +662,6 @@ def report(
         print_general_report(symbol)
 
 
-# ── analyze-trades ────────────────────────────────────────────────────────────
-
-@app.command(name="analyze-trades")
-def analyze_trades() -> None:
-    """
-    Full paper-trade analysis: performance, breakdowns by symbol/direction/
-    setup/regime/hour, MFE/MAE entry diagnostics, capital reconciliation
-    and data-hygiene checks.
-    """
-    _init()
-    from app.reports.trade_analysis import print_trade_analysis
-    print_trade_analysis()
-
-
 # ── sync-universe ─────────────────────────────────────────────────────────────
 
 @app.command(name="sync-universe")
@@ -762,25 +743,16 @@ def live(
     _init()
     from app.live.watcher import LiveWatcher
 
-    import sys; sys.path.insert(0, ".")
-
-    # Optional: sync universe from Binance, then auto-backtest any new coins
-    # Backtests run in a background thread so the watcher starts immediately
-    # and doesn't miss candle closes. New symbols appear in the watchlist on
-    # the next rescan (cycle 144) once their backtests complete.
+    # Optional: sync universe from Binance before scanning
     if sync:
-        import threading as _t
         from app.data.universe import sync_universe
-        from scan_universe import auto_backtest_new_symbols
-        sync_universe(n=sync_top, min_volume_usd=sync_min_volume)
-        _bt_thread = _t.Thread(
-            target=auto_backtest_new_symbols,
-            name="AutoBacktest",
-            daemon=True,
+        sync_universe(
+            n=sync_top,
+            min_volume_usd=sync_min_volume,
         )
-        _bt_thread.start()
 
     if auto:
+        import sys; sys.path.insert(0, ".")
         from scan_universe import select_watchlist
         selected = select_watchlist(
             n=auto_n,
@@ -801,8 +773,5 @@ def live(
         rescan_every=rescan_every,
         rescan_n=rescan_n,
         rescan_validated=rescan_validated,
-        sync=sync,
-        sync_top=sync_top,
-        sync_min_volume=sync_min_volume,
     )
     watcher.run()

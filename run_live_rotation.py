@@ -1,24 +1,32 @@
 """
-Daily rotation live paper trader — single process, threaded.
+Daily rotation live paper trader — single multi-symbol watcher.
 
-At startup picks 5 fresh A-grade coins from coin_pool.json (avoiding
-yesterday's selection), then runs all 5 as live watchers inside one
-process using threads.
+Coin selection is CONVICTION-BASED via the universe scanner, restricted to
+the curated pool in coin_pool.json (validated coins first, padded with the
+highest-conviction unvalidated pool coins). Random selection remains only
+as a fallback when the scanner fails.
+
+Rotation happens IN-PROCESS: the watcher re-runs the pool scan every
+--rescan-every cycles (default 48 × 30m = daily), pinning symbols with open
+trades and emergency-closing positions in dangerous regimes. No external
+restart is needed for the daily re-pick.
+
+rotation_history.json is written for audit only — the old "avoid yesterday's
+coins" rule is gone: trend persistence is the edge, so winners stay until
+the scanner ranks something higher.
 
 Usage:
     python run_live_rotation.py
     python run_live_rotation.py --capital 10000 --risk 1.0
     python run_live_rotation.py --dry-run
-    python run_live_rotation.py --show-today   # print today's coins and exit
+    python run_live_rotation.py --show-today   # print today's picks and exit
 """
 
 import argparse
 import json
 import os
 import random
-import signal
 import sys
-import threading
 import time
 from datetime import datetime, timezone
 
@@ -27,6 +35,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 POOL_FILE     = "coin_pool.json"
 HISTORY_FILE  = "rotation_history.json"
+PIDS_FILE     = "live_pids.json"
 COINS_PER_DAY = 5
 
 
@@ -34,87 +43,87 @@ COINS_PER_DAY = 5
 
 def load_pool():
     with open(POOL_FILE) as f:
-        return json.load(f)["pool"]
+        return [s.upper() for s in json.load(f)["pool"]]
 
-def load_history():
-    if not os.path.exists(HISTORY_FILE):
-        return []
-    with open(HISTORY_FILE) as f:
-        return json.load(f).get("history", [])
-
-def save_history(history):
-    with open(HISTORY_FILE, "w") as f:
-        json.dump({"history": history}, f, indent=2)
 
 def today_str():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-def pick_today(pool, history):
+
+def record_history(coins):
+    history = []
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE) as f:
+            history = json.load(f).get("history", [])
     today = today_str()
+    history = [h for h in history if h.get("date") != today]
+    history.append({"date": today, "coins": list(coins)})
+    with open(HISTORY_FILE, "w") as f:
+        json.dump({"history": history[-30:]}, f, indent=2)
 
-    # Reuse today's selection if already picked
-    for entry in history:
-        if entry["date"] == today:
-            return entry["coins"], False  # (coins, is_new)
 
-    # Avoid repeating yesterday's coins
-    yesterday_coins = set(history[-1]["coins"]) if history else set()
-    fresh = [c for c in pool if c not in yesterday_coins]
-    if len(fresh) < COINS_PER_DAY:
-        fresh = pool  # fallback to full pool
+def pick_coins(pool, n=COINS_PER_DAY):
+    """Conviction-ranked pick from the pool; random fallback on scanner error."""
+    try:
+        from scan_universe import select_watchlist
+        picks = select_watchlist(n=n, validated_only=True, pool=pool, verbose=True)
+        if picks:
+            return picks, "scanner"
+    except Exception as exc:
+        print(f"  [Rotation] Scanner failed ({exc}) — falling back to random pick.")
+    return random.sample(pool, min(n, len(pool))), "random"
 
-    selected = random.sample(fresh, COINS_PER_DAY)
 
-    history.append({"date": today, "coins": selected})
-    history = history[-30:]
-    save_history(history)
-
-    return selected, True
+def get_open_symbols(coins):
+    """Symbols with open paper trades that are not already in the watchlist."""
+    import sqlite3
+    db_path = os.environ.get("DB_PATH") or os.path.join("data", "db", "lqmtf.db")
+    if not os.path.exists(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT DISTINCT symbol FROM paper_trades WHERE status='open'"
+    ).fetchall()
+    conn.close()
+    return [r[0] for r in rows if r[0] not in coins]
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Daily rotation live paper trader")
-    parser.add_argument("--capital",    type=float, default=None)
-    parser.add_argument("--risk",       type=float, default=1.0)
-    parser.add_argument("--dry-run",    action="store_true")
-    parser.add_argument("--show-today", action="store_true", help="Print today's coins and exit")
+    parser.add_argument("--capital",      type=float, default=None)
+    parser.add_argument("--risk",         type=float, default=1.0)
+    parser.add_argument("--dry-run",      action="store_true")
+    parser.add_argument("--show-today",   action="store_true", help="Print today's picks and exit")
+    parser.add_argument("--rescan-every", type=int, default=48,
+                        help="Re-run the pool scan every N cycles (48 × 30m = daily)")
     args = parser.parse_args()
 
     # DB migrations before anything else
     from app.db.migrations import run_migrations
     run_migrations()
 
-    pool    = load_pool()
-    history = load_history()
-    coins, is_new = pick_today(pool, history)
-
-    # Always include any symbol with an open paper trade, even if not in rotation
-    import sqlite3
-    db_path = os.path.join("data", "db", "lqmtf.db")
-    open_symbols = []
-    if os.path.exists(db_path):
-        conn = sqlite3.connect(db_path)
-        rows = conn.execute(
-            "SELECT DISTINCT symbol FROM paper_trades WHERE status='open'"
-        ).fetchall()
-        conn.close()
-        open_symbols = [r[0] for r in rows if r[0] not in coins]
-
+    pool = load_pool()
+    coins, source = pick_coins(pool)
+    open_symbols = get_open_symbols(coins)
     all_coins = coins + open_symbols
+    record_history(coins)
 
     print("=" * 60)
     print("  LQ-MTF Daily Rotation — Live Paper Trading")
     print(f"  Date: {today_str()}  |  Risk: {args.risk}%  |  Dry-run: {args.dry_run}")
-    print(f"  {'New selection' if is_new else 'Resuming today'}:")
+    print(f"  Selection: {source} (conviction-ranked pool scan)"
+          if source == "scanner" else "  Selection: RANDOM FALLBACK (scanner failed)")
     for i, c in enumerate(coins, 1):
         print(f"    {i}. {c}")
     if open_symbols:
-        print(f"  + Open trade watchlist:")
+        print("  + Open trade watchlist:")
         for c in open_symbols:
             print(f"      {c} (has open trade)")
-    print("  Press Ctrl+C to stop all")
+    print(f"  In-process re-pick every {args.rescan_every} cycles "
+          f"(~{args.rescan_every / 2:.0f}h on 30m)")
+    print("  Press Ctrl+C to stop")
     print("=" * 60)
     print()
 
@@ -123,8 +132,8 @@ def main():
 
     # Auto-backfill any coin that has no candle data yet
     print("  Checking candle data for today's coins...")
+    import subprocess
     for sym in all_coins:
-        import subprocess
         result = subprocess.run(
             [sys.executable, "main.py", "backfill", "--symbol", sym,
              "--timeframes", "1d", "--timeframes", "12h",
@@ -136,48 +145,26 @@ def main():
         print(f"  {'Backfilled' if downloaded else 'Data OK'}: {sym}")
     print()
 
-    # Shared stop event — set by Ctrl+C handler, watched by all watcher threads
-    stop_event = threading.Event()
+    # Record our PID so run_handoff.py can manage this runner
+    with open(PIDS_FILE, "w") as f:
+        json.dump({"runner": "run_live_rotation", "pids": {"main": os.getpid()}}, f, indent=2)
 
-    def handle_stop(*_):
-        if not stop_event.is_set():
-            print("\n\nStopping all watchers...", flush=True)
-        stop_event.set()
-
-    signal.signal(signal.SIGINT,  handle_stop)
-    signal.signal(signal.SIGTERM, handle_stop)
-
-    # Create one LiveWatcher per coin and run each in its own thread
+    # ONE multi-symbol watcher: shared PositionManager (portfolio caps work),
+    # one PriceMonitor, one Telegram listener, in-process daily rescan.
     from app.live.watcher import LiveWatcher
 
-    threads = []
-    for sym in all_coins:
-        watcher = LiveWatcher(
-            symbol=sym,
-            risk_pct=args.risk,
-            paper_capital=args.capital,
-            dry_run=args.dry_run,
-            stop_event=stop_event,
-        )
-        t = threading.Thread(target=watcher.run, name=sym, daemon=True)
-        threads.append(t)
-
-    for t in threads:
-        t.start()
-        print(f"  Started {t.name}", flush=True)
-        time.sleep(0.4)  # slight stagger to avoid simultaneous DB writes at startup
-
-    print()
-    print("  All coins running. Waiting for candle closes...", flush=True)
-    print()
-
-    # Block main thread until stop_event is set (Ctrl+C)
-    stop_event.wait()
-
-    # Give threads up to 15s to finish their current cycle cleanly
-    for t in threads:
-        t.join(timeout=15)
-
+    watcher = LiveWatcher(
+        symbols=all_coins,
+        risk_pct=args.risk,
+        paper_capital=args.capital,
+        dry_run=args.dry_run,
+        rescan_every=args.rescan_every,
+        rescan_n=COINS_PER_DAY,
+        rescan_validated=True,
+        rescan_pool=pool,
+        rotation_history_file=HISTORY_FILE,
+    )
+    watcher.run()
     print("Done.", flush=True)
 
 

@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     # Backtest — futures fees (taker 0.05% vs spot 0.10%)
     backtest_fee_pct: float = 0.05
     backtest_slippage_pct: float = 0.05
+    # Generate signals every N candles in backtests. Live evaluates every
+    # candle; set 1 for full parity (~2× runtime).
+    backtest_signal_step: int = Field(2, env="BACKTEST_SIGNAL_STEP")
 
     # Backtest validation thresholds — a run must pass ALL THREE to count as
     # "profitable" for the purposes of the validated watchlist.
@@ -93,6 +96,47 @@ class Settings(BaseSettings):
 
     # Ratchet stop
     mtf_ratchet_enabled: bool = Field(True, env="MTF_RATCHET_ENABLED")
+
+    # ── Portfolio risk budget ─────────────────────────────────────────────────
+    # Total capital_at_risk across ALL open positions may not exceed this % of
+    # portfolio equity. With 1% risk/trade this allows ~3 concurrent positions.
+    max_open_risk_pct: float = Field(3.0, env="MAX_OPEN_RISK_PCT")
+    # Risk scaling for additional same-direction positions (crypto is one big
+    # BTC trade): 1st position 100% risk, 2nd 70%, 3rd+ 50%.
+    corr_risk_scale: list[float] = [1.0, 0.7, 0.5]
+
+    # ── Live trade management (parity with backtest engine) ──────────────────
+    # Force-close stagnating trades after this many hours (96 × 30m candles).
+    max_trade_age_hours: float = Field(48.0, env="MAX_TRADE_AGE_HOURS")
+
+    # ── Partial take-profit ───────────────────────────────────────────────────
+    partial_tp_enabled:  bool  = Field(True, env="PARTIAL_TP_ENABLED")
+    partial_tp_r:        float = Field(1.5,  env="PARTIAL_TP_R")        # trigger at +1.5R
+    partial_tp_fraction: float = Field(0.5,  env="PARTIAL_TP_FRACTION") # close 50%
+
+    # ── Entry limit orders ────────────────────────────────────────────────────
+    # Instead of market-entering when price is anywhere near the zone, place a
+    # simulated limit at the signal's entry price and wait for the retrace.
+    # DEFAULT OFF: backtest (BTC Q1-2025: 1 trade/+$133 vs 6 trades/+$895) and
+    # live MAE data (winners never retrace) both show waiting for a retrace
+    # skips the best trades. Enable with ENTRY_LIMIT_ENABLED=1 to experiment.
+    entry_limit_enabled:        bool  = Field(False, env="ENTRY_LIMIT_ENABLED")
+    entry_limit_expiry_candles: int   = Field(4,    env="ENTRY_LIMIT_EXPIRY_CANDLES")  # × 30m = 2h
+    # If |entry - current| is below this %, fill at market immediately.
+    entry_limit_min_gap_pct:    float = Field(0.05, env="ENTRY_LIMIT_MIN_GAP_PCT")
+
+    # ── Funding-rate filter (futures sentiment) ───────────────────────────────
+    # Block SELLs when funding is already strongly negative (crowded short,
+    # squeeze risk) and BUYs when strongly positive. 0.0005 = 0.05% per 8h.
+    funding_filter_enabled: bool  = Field(True,   env="FUNDING_FILTER_ENABLED")
+    funding_rate_limit:     float = Field(0.0005, env="FUNDING_RATE_LIMIT")
+
+    # ── Macro event guard ─────────────────────────────────────────────────────
+    # Block new entries within ± this many hours of scheduled macro events
+    # (FOMC, CPI, ...) listed in data/macro_events.json.
+    macro_guard_enabled: bool  = Field(True, env="MACRO_GUARD_ENABLED")
+    macro_guard_hours:   float = Field(2.0,  env="MACRO_GUARD_HOURS")
+    macro_events_file:   Path  = Field(default=Path("data/macro_events.json"))
 
     def ensure_dirs(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

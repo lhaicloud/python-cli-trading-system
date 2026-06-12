@@ -45,7 +45,7 @@ def apply_ratchet(
 
     # All defined levels activated — maintain ATR trail every candle
     if ratchet_level >= len(ratchet_levels):
-        atr_distance = max(atr * 2, 1.0)
+        atr_distance = max(atr * 2, entry * 0.001)
         if direction == "BUY":
             trail_sl = candle_high - atr_distance
             return max(current_sl, trail_sl), ratchet_level
@@ -68,7 +68,7 @@ def apply_ratchet(
         return current_sl, ratchet_level
 
     if level["action"] == "atr_trail":
-        atr_distance = max(atr * 2, 1.0)
+        atr_distance = max(atr * 2, entry * 0.001)
         new_sl = (
             candle_high - atr_distance if direction == "BUY" else candle_low + atr_distance
         )

@@ -290,6 +290,124 @@ def get_open_paper_trades(symbol: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_all_open_paper_trades() -> list[dict]:
+    """All open trades across every symbol — used for cross-process portfolio caps."""
+    sql = "SELECT * FROM paper_trades WHERE status='open'"
+    with get_conn() as conn:
+        rows = conn.execute(sql).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_total_closed_pnl() -> float:
+    """Sum of realized PnL across all closed trades (all symbols)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(pnl), 0) FROM paper_trades WHERE status != 'open'"
+        ).fetchone()
+    return float(row[0]) if row else 0.0
+
+
+def apply_partial_tp(trade_id: int, new_size: float, partial_pnl: float) -> None:
+    """Record a partial take-profit: shrink the position, store realized PnL."""
+    with get_conn() as conn:
+        conn.execute(
+            """UPDATE paper_trades
+               SET position_size=?, partial_taken=1, partial_pnl=?,
+                   updated_at=CURRENT_TIMESTAMP
+               WHERE id=?""",
+            (round(new_size, 6), round(partial_pnl, 2), trade_id),
+        )
+
+
+# ── Funding rates ──────────────────────────────────────────────────────────────
+
+def save_funding_rates(symbol: str, rows: list[dict]) -> int:
+    """Upsert historical funding rates. Returns number of rows written."""
+    if not rows:
+        return 0
+    with get_conn() as conn:
+        conn.executemany(
+            """INSERT OR IGNORE INTO funding_rates (symbol, funding_time, rate)
+               VALUES (?, ?, ?)""",
+            [(symbol.upper(), r["funding_time"], r["rate"]) for r in rows],
+        )
+    return len(rows)
+
+
+def get_funding_rate_at(symbol: str, ts_ms: int) -> float | None:
+    """
+    Latest stored funding rate at/just before ts_ms, or None when no data
+    within the prior 24h (stale data must not gate decisions).
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            """SELECT rate FROM funding_rates
+               WHERE symbol = ? AND funding_time <= ? AND funding_time >= ?
+               ORDER BY funding_time DESC LIMIT 1""",
+            (symbol.upper(), ts_ms, ts_ms - 24 * 3_600_000),
+        ).fetchone()
+    return float(row[0]) if row else None
+
+
+# ── Pending limit orders ───────────────────────────────────────────────────────
+
+def create_pending_order(d: dict) -> int:
+    sql = """
+        INSERT INTO pending_orders
+            (symbol, signal_id, direction, limit_price, stop_loss, take_profit,
+             risk_reward, model_version, created_ms, expiry_ms, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+    """
+    with get_conn() as conn:
+        cur = conn.execute(sql, (
+            d["symbol"], d.get("signal_id"), d["direction"], d["limit_price"],
+            d["stop_loss"], d["take_profit"], d.get("risk_reward"),
+            d.get("model_version"), d["created_ms"], d["expiry_ms"],
+        ))
+        return cur.lastrowid
+
+
+def get_pending_orders(symbol: str | None = None) -> list[dict]:
+    with get_conn() as conn:
+        if symbol:
+            rows = conn.execute(
+                "SELECT * FROM pending_orders WHERE status='pending' AND symbol=?",
+                (symbol,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM pending_orders WHERE status='pending'"
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_pending_order_status(
+    order_id: int, status: str, filled_trade_id: int | None = None
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE pending_orders SET status=?, filled_trade_id=? WHERE id=?",
+            (status, filled_trade_id, order_id),
+        )
+
+
+def get_closed_pnl_since(since_ms: int) -> float:
+    """
+    Sum of realized PnL for trades closed at/after since_ms (all symbols).
+    typeof() guard: legacy rows stored close_time as TEXT, which SQLite
+    sorts above every INTEGER and would wrongly match.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            """SELECT COALESCE(SUM(pnl), 0) FROM paper_trades
+               WHERE status != 'open'
+                 AND typeof(close_time) = 'integer'
+                 AND close_time >= ?""",
+            (since_ms,),
+        ).fetchone()
+    return float(row[0]) if row else 0.0
+
+
 def get_last_stopped_trade_ms(symbol: str) -> int | None:
     """Return close_time (ms) of the most recent stopped-out trade for symbol, or None."""
     sql = """

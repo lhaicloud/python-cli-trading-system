@@ -50,11 +50,28 @@ class SignalFilter:
     environment variables without touching code.
     """
 
-    def evaluate(self, sig: "SignalResult") -> tuple[bool, str]:
+    def __init__(self) -> None:
+        # Optional evaluation context (set per evaluate() call):
+        #   _now_ms  — signal timestamp for time-of-day checks (backtests pass
+        #              the candle time; live defaults to wall clock)
+        #   _df_30m  — historical 30m frame for candle checks (backtests pass
+        #              the lookahead-safe slice; live falls back to the DB)
+        self._now_ms: int | None = None
+        self._df_30m = None
+
+    def evaluate(
+        self,
+        sig: "SignalResult",
+        *,
+        now_ms: int | None = None,
+        df_30m=None,
+    ) -> tuple[bool, str]:
         """
         Run every filter in order.
         Returns (True, '') if all pass, or (False, reason) on first failure.
         """
+        self._now_ms = now_ms
+        self._df_30m = df_30m
         for check in (
             self._null_confidence,
             self._zone_rating,
@@ -66,6 +83,8 @@ class SignalFilter:
             self._distribution_regime,
             self._time_of_day,
             self._candle_rejection,
+            self._macro_events,
+            self._funding_rate,
         ):
             ok, reason = check(sig)
             if not ok:
@@ -171,7 +190,8 @@ class SignalFilter:
         Low-liquidity Asia dead zone (01-04) and NY chop hours (13, 15, 23)
         consistently produce stopped trades.
         """
-        utc_hour = time.gmtime().tm_hour
+        ref_s = (self._now_ms / 1000) if self._now_ms else time.time()
+        utc_hour = time.gmtime(ref_s).tm_hour
         if utc_hour in _BLOCKED_HOURS_UTC:
             return False, (
                 f"Entry blocked at {utc_hour:02d}:xx UTC — "
@@ -192,13 +212,20 @@ class SignalFilter:
         BUY:  block if last candle is strongly bearish with no lower wick.
         """
         try:
-            from app.data.repository import get_candles
-            df = get_candles(sig.symbol, "30m", limit=3)
-            if df is None or len(df) < 2:
-                return True, ""  # can't check — allow through
-
-            # Use the second-to-last candle (last fully closed candle)
-            c = df.iloc[-2]
+            if self._df_30m is not None:
+                # Backtest path: caller supplies the lookahead-safe slice whose
+                # last row IS the last fully closed candle.
+                df = self._df_30m
+                if len(df) < 1:
+                    return True, ""
+                c = df.iloc[-1]
+            else:
+                from app.data.repository import get_candles
+                df = get_candles(sig.symbol, "30m", limit=3)
+                if df is None or len(df) < 2:
+                    return True, ""  # can't check — allow through
+                # Use the second-to-last candle (last fully closed candle)
+                c = df.iloc[-2]
             o, h, l, cl = float(c["open"]), float(c["high"]), float(c["low"]), float(c["close"])
             candle_range = h - l
             if candle_range == 0:
@@ -237,3 +264,122 @@ class SignalFilter:
             logger.warning("[Filter] candle_rejection check failed: %s", exc)
 
         return True, ""
+
+    def _macro_events(self, sig: "SignalResult") -> tuple[bool, str]:
+        """
+        Block entries within ± macro_guard_hours of scheduled macro events
+        (FOMC decisions, CPI releases — data/macro_events.json). These cause
+        violent whipsaws that zone logic cannot anticipate.
+        """
+        cfg = get_settings()
+        if not cfg.macro_guard_enabled:
+            return True, ""
+        try:
+            events = _load_macro_events(cfg.macro_events_file)
+            if not events:
+                return True, ""
+            ref_ms = self._now_ms or int(time.time() * 1000)
+            window_ms = cfg.macro_guard_hours * 3_600_000
+            for name, event_ms in events:
+                if abs(ref_ms - event_ms) <= window_ms:
+                    return False, (
+                        f"Macro guard: within ±{cfg.macro_guard_hours:.0f}h of {name}"
+                    )
+        except Exception as exc:
+            logger.warning("[Filter] macro_events check failed: %s", exc)
+        return True, ""
+
+    def _funding_rate(self, sig: "SignalResult") -> tuple[bool, str]:
+        """
+        Futures sentiment guard. Shorting when funding is already strongly
+        negative means joining a crowded short (squeeze risk) — and vice
+        versa for longs.
+
+        Live: current rate from the API (cached 5 min).
+        Backtest (df_30m provided): stored historical rate at the candle
+        time (funding_rates table; populated by scripts/backfill_funding.py).
+        Skips silently when no rate is available either way.
+        """
+        cfg = get_settings()
+        if not cfg.funding_filter_enabled:
+            return True, ""
+        try:
+            if self._df_30m is not None:
+                from app.data.repository import get_funding_rate_at
+                rate = get_funding_rate_at(
+                    sig.symbol, self._now_ms or int(time.time() * 1000)
+                )
+            else:
+                rate = _cached_funding_rate(sig.symbol)
+            if rate is None:
+                return True, ""
+            limit = cfg.funding_rate_limit
+            if sig.signal == "SELL" and rate < -limit:
+                return False, (
+                    f"Funding {rate * 100:.3f}% < -{limit * 100:.3f}% — "
+                    f"crowded short, squeeze risk"
+                )
+            if sig.signal == "BUY" and rate > limit:
+                return False, (
+                    f"Funding {rate * 100:.3f}% > +{limit * 100:.3f}% — "
+                    f"crowded long, flush risk"
+                )
+        except Exception as exc:
+            logger.warning("[Filter] funding_rate check failed: %s", exc)
+        return True, ""
+
+
+# ── Module-level caches ─────────────────────────────────────────────────────────
+
+_macro_cache: dict = {"mtime": None, "events": []}
+
+
+def _load_macro_events(path) -> list[tuple[str, int]]:
+    """Parse data/macro_events.json -> [(name, utc_ms)], cached by file mtime."""
+    import json
+    import os
+    from datetime import datetime, timezone
+
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return []
+    if _macro_cache["mtime"] == mtime:
+        return _macro_cache["events"]
+
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    events: list[tuple[str, int]] = []
+    for e in raw.get("events", []):
+        ts = e.get("utc", "").replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            events.append((e.get("name", "event"), int(dt.timestamp() * 1000)))
+        except ValueError:
+            continue
+    _macro_cache["mtime"] = mtime
+    _macro_cache["events"] = events
+    return events
+
+
+_funding_cache: dict[str, tuple[float, float]] = {}   # symbol -> (rate, fetched_at)
+_FUNDING_TTL_S = 300
+
+
+def _cached_funding_rate(symbol: str) -> float | None:
+    """Funding rate with a 5-minute cache so each signal cycle costs ≤1 call."""
+    now = time.time()
+    hit = _funding_cache.get(symbol)
+    if hit and now - hit[1] < _FUNDING_TTL_S:
+        return hit[0]
+    try:
+        from app.data.binance_client import BinanceClient
+        with BinanceClient() as client:
+            rate = client.get_funding_rate(symbol)
+        _funding_cache[symbol] = (rate, now)
+        return rate
+    except Exception as exc:
+        logger.warning("[Filter] funding fetch failed for %s: %s", symbol, exc)
+        return None

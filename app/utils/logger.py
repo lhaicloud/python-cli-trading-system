@@ -33,6 +33,9 @@ def _configure() -> None:
             logging.FileHandler(log_file, encoding="utf-8"),
         ],
     )
+    # httpx logs full request URLs at INFO — including the Telegram bot token.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     _configured = True
 
 

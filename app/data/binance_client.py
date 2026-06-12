@@ -120,6 +120,46 @@ class BinanceClient:
         data = self._get("/fapi/v1/ticker/price", params={"symbol": symbol.upper()})
         return float(data["price"])
 
+    def get_funding_rate(self, symbol: str) -> float:
+        """
+        Current funding rate for a perpetual (e.g. 0.0001 = 0.01% per 8h).
+        Positive = longs pay shorts (crowded long); negative = shorts pay longs.
+        """
+        data = self._get("/fapi/v1/premiumIndex", params={"symbol": symbol.upper()})
+        return float(data.get("lastFundingRate", 0) or 0)
+
+    def get_funding_history(
+        self,
+        symbol: str,
+        start_ms: int,
+        end_ms: int,
+    ) -> list[dict[str, Any]]:
+        """
+        Historical funding rates (one row per 8h settlement), paginated.
+        Returns [{"funding_time": ms, "rate": float}, ...] ascending.
+        """
+        out: list[dict[str, Any]] = []
+        cursor = start_ms
+        while cursor < end_ms:
+            batch = self._get("/fapi/v1/fundingRate", params={
+                "symbol": symbol.upper(),
+                "startTime": cursor,
+                "endTime": end_ms,
+                "limit": 1000,
+            })
+            if not batch:
+                break
+            for row in batch:
+                out.append({
+                    "funding_time": int(row["fundingTime"]),
+                    "rate": float(row.get("fundingRate", 0) or 0),
+                })
+            if len(batch) < 1000:
+                break
+            cursor = int(batch[-1]["fundingTime"]) + 1
+            time.sleep(_REQUEST_PAUSE_S)
+        return out
+
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:

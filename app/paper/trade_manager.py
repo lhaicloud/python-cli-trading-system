@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.data.binance_client import BinanceClient
 from app.data.repository import get_paper_trade_summary
-from app.paper.account import get_paper_capital, update_capital_after_trade
+from app.paper.account import get_paper_capital
 from app.paper.position_manager import PositionManager
 from app.paper.signal_filter import SignalFilter
 from app.ta.signals import generate_signal, SignalResult
@@ -49,11 +49,12 @@ def run_paper_session(
         logger.error("[Paper] Could not fetch price: %s", exc)
         current_price = float(df_30m["close"].iloc[-1]) if not df_30m.empty else 0.0
 
-    # Update open trades
+    # Fill/expire pending limit orders, then update open trades.
+    # PositionManager handles all capital updates internally.
+    fills  = pm.check_pending(symbol, current_price, current_price)
     closed = pm.check_price(symbol, current_price)
-    for t in closed:
-        pnl     = t.get("pnl", 0)
-        capital = update_capital_after_trade(symbol, pnl)
+    if closed:
+        capital = get_paper_capital(symbol)
 
     # Generate signal
     sig = generate_signal(
@@ -68,10 +69,17 @@ def run_paper_session(
     )
 
     trade_id = None
+    pending_id = None
     if sig.signal in ("BUY", "SELL"):
         passed, reason = _filter.evaluate(sig)
         if passed:
-            trade_id = pm.open(symbol, sig, capital, signal_id)
+            outcome, oid = pm.submit(
+                symbol, sig, capital, signal_id, current_price=current_price
+            )
+            if outcome == "opened":
+                trade_id = oid
+            elif outcome == "pending":
+                pending_id = oid
         else:
             logger.info("[Paper][%s] Signal filtered: %s", symbol, reason)
 
@@ -81,6 +89,8 @@ def run_paper_session(
         "current_price": current_price,
         "capital":       capital,
         "trade_opened":  trade_id,
+        "pending_order": pending_id,
         "closed_trades": closed,
+        "order_events":  fills,
         "summary":       summary,
     }

@@ -3,6 +3,7 @@
 
 # CLI
 typer[all]==0.9.0
+click==8.1.7   # typer 0.9 is incompatible with click >= 8.2
 rich==13.7.1
 
 # Data & Math
@@ -11,12 +12,13 @@ numpy==1.26.4
 
 # HTTP
 httpx==0.27.0
+websockets==12.0   # PriceMonitor live stream (REST fallback if unavailable)
 
 # Database
 SQLAlchemy==2.0.30
 
 # ML
-scikit-learn==1.5.0
+scikit-learn==1.6.1   # must match the version the joblib model dumps were trained with
 joblib==1.4.2
 
 # Config / Validation
