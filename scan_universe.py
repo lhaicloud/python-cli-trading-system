@@ -141,6 +141,23 @@ def scan_and_rank(
             df_12h = add_indicators(df_12h) if not df_12h.empty else df_12h
             df_1w  = add_indicators(df_1w)
 
+            # ── Liquidity + volatility quality gate (prevention at source) ──
+            # Keep RIF-like names off the watchlist: thin coins get noise-swept
+            # stops, wild coins can't be governed by a zone stop. Calibrated on
+            # post-deploy trades (every winner ≥ $38M/day & daily atr% ≤ 11.1).
+            avg_qv_musd = 0.0
+            if "quote_volume" in df_1d.columns:
+                qv = df_1d["quote_volume"].dropna()
+                if len(qv) > 0:
+                    avg_qv_musd = float(qv.iloc[-20:].mean()) / 1e6
+            daily_atr_pct = float(df_1d["atr_pct"].iloc[-1]) if "atr_pct" in df_1d.columns else 0.0
+
+            if 0 < avg_qv_musd < cfg.min_daily_quote_volume_musd:
+                if verbose:
+                    print(f"  {sym:<12} SKIP (illiquid ${avg_qv_musd:,.0f}M/d "
+                          f"< ${cfg.min_daily_quote_volume_musd:,.0f}M)")
+                continue
+
             pf          = run_prefilter(df_1w, df_1d, df_12h, df_4h, df_1h, df_30m, cfg)
             regime_info = classify_regime(df_4h)
             regime      = regime_info["regime"]
@@ -172,7 +189,10 @@ def scan_and_rank(
             zone_bonus = 15 if zone_near else 0
             # Bonus for having ML models (more reliable signal confidence)
             ml_bonus   = 5 if (has_buy and has_sell) else (2 if (has_buy or has_sell) else 0)
-            conv_score = gap * 0.60 + regime_pts * 5 * 0.25 + zone_bonus * 0.15 + ml_bonus
+            # Demote (don't hard-exclude) coins whose daily volatility exceeds the
+            # entry gate — they're only tradeable on calmer days, so rank them last.
+            vol_penalty = max(0.0, daily_atr_pct - cfg.max_daily_atr_pct) * 2.0
+            conv_score = gap * 0.60 + regime_pts * 5 * 0.25 + zone_bonus * 0.15 + ml_bonus - vol_penalty
 
             bt_info = bt_stats.get(sym, {})
 
@@ -190,6 +210,8 @@ def scan_and_rank(
                 "zone_near":       zone_near,
                 "zone_dist":       f"{nearest_zone_pct:.1f}%" if nearest_zone_pct else "—",
                 "price":           current_price,
+                "liq_musd":        round(avg_qv_musd, 1),
+                "daily_atr_pct":   round(daily_atr_pct, 1),
                 "conv_score":      conv_score,
                 "backtest_runs":   bt_info.get("runs", 0),
                 "profitable_runs": bt_info.get("profitable", 0),
