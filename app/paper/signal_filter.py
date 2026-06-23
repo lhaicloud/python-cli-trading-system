@@ -151,6 +151,10 @@ class SignalFilter:
         return True, ""
 
     # ── New filters ───────────────────────────────────────────────────────────
+    # Note: daily realized volatility is no longer a hard veto. High-atr% trades
+    # keep positive expectancy, so they are sized DOWN via
+    # math_utils.volatility_size_factor at position-sizing time (live + backtest)
+    # rather than blocked here. See app/utils/math_utils.py.
 
     def _premium_discount_alignment(self, sig: "SignalResult") -> tuple[bool, str]:
         """

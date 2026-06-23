@@ -39,6 +39,7 @@ from app.data.repository import (
     get_portfolio_stops_in_window,
     get_recent_closed_paper_trades,
     get_recent_stops_in_window,
+    get_symbol_risk_stats,
     is_zone_blacklisted,
     open_paper_trade,
     save_feature_snapshot,
@@ -52,7 +53,7 @@ from app.paper.account import (
 from app.paper.broker import simulate_fill
 from app.ta.leverage import dynamic_leverage
 from app.utils.logger import get_logger
-from app.utils.math_utils import position_size
+from app.utils.math_utils import position_size, volatility_size_factor
 
 if TYPE_CHECKING:
     from app.ta.signals import SignalResult
@@ -192,6 +193,19 @@ class PositionManager:
         recent_stops = get_recent_stops_in_window(symbol, _WINDOW_24H)
         if recent_stops >= 2:
             return False, f"{symbol} blocked: {recent_stops} stops in last 24 h"
+
+        # 7b. Per-symbol risk memory: bench a structurally-broken symbol whose
+        # stops cluster over a multi-day window even when spaced too far apart to
+        # trip the intraday cooldowns (RIFUSDT stopped 3× over 7 days). 0 disables.
+        if cfg.symbol_bench_max_stops > 0 and cfg.symbol_bench_window_days > 0:
+            bench_window_ms = int(cfg.symbol_bench_window_days * 24 * 60 * 60 * 1000)
+            bench_stops, _ = get_symbol_risk_stats(symbol, bench_window_ms)
+            if bench_stops >= cfg.symbol_bench_max_stops:
+                return False, (
+                    f"{symbol} benched: {bench_stops} stops in last "
+                    f"{cfg.symbol_bench_window_days:.0f} d "
+                    f"(≥{cfg.symbol_bench_max_stops})"
+                )
 
         # 8. Portfolio circuit breaker: 3+ stops across any symbols in last 8 h
         portfolio_stops = get_portfolio_stops_in_window(_WINDOW_8H)
@@ -365,6 +379,7 @@ class PositionManager:
             rr          = sig.risk_reward,
             signal_id   = signal_id,
             model_version = sig.model_version,
+            daily_atr_pct = sig.daily_atr_pct,
         )
         if trade_id:
             _save_snapshot(sig, symbol, signal_id)
@@ -380,6 +395,7 @@ class PositionManager:
         rr: float,
         signal_id: int | None,
         model_version: str,
+        daily_atr_pct: float = 0.0,
     ) -> int | None:
         """Shared insert path for market entries and limit fills."""
         cfg = get_settings()
@@ -398,6 +414,21 @@ class PositionManager:
         ]
         scale_idx = min(len(same_dir), len(cfg.corr_risk_scale) - 1)
         eff_risk_pct = self.risk_pct * cfg.corr_risk_scale[scale_idx]
+
+        # Volatility-scaled sizing: shrink risk on high daily-ATR% coins instead
+        # of vetoing them (they keep positive expectancy but a fat loss tail).
+        vol_factor = volatility_size_factor(
+            daily_atr_pct,
+            full_atr_pct=cfg.vol_size_full_atr_pct,
+            slope=cfg.vol_size_slope,
+            floor=cfg.vol_size_floor,
+        )
+        if vol_factor < 1.0:
+            logger.info(
+                "[PM][%s] Volatility sizing: daily ATR %.1f%% → risk ×%.2f",
+                symbol, daily_atr_pct, vol_factor,
+            )
+        eff_risk_pct *= vol_factor
 
         # Size off the unified portfolio equity, not a per-symbol silo
         equity = get_portfolio_capital()

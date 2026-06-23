@@ -99,3 +99,26 @@ def position_size(
     units = (risk_amount / price_risk) * max(1, int(leverage))
     max_units = capital * max(1, int(leverage)) / entry
     return min(units, max_units)
+
+
+def volatility_size_factor(
+    daily_atr_pct: float,
+    full_atr_pct: float = 8.0,
+    slope: float = 0.08,
+    floor: float = 0.3,
+) -> float:
+    """
+    Risk multiplier (0–1) that shrinks position size as daily realized
+    volatility (atr_14/close) rises. High-atr% trades keep positive expectancy
+    but lower win-rate and a fat loss tail (and fare far worse live than in
+    backtest), so we size them down rather than skip them.
+
+        factor = clamp(1 - slope * (atr% - full_atr_pct), floor, 1.0)
+
+    Defaults give: atr% ≤ 8 → 1.0, atr% 13 → 0.6, atr% 18 → floor 0.3.
+    daily_atr_pct == 0 (unavailable) → 1.0 (no scaling, fail-open).
+    """
+    if daily_atr_pct <= full_atr_pct:
+        return 1.0
+    factor = 1.0 - slope * (daily_atr_pct - full_atr_pct)
+    return max(floor, min(1.0, factor))

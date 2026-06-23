@@ -131,6 +131,32 @@ class Settings(BaseSettings):
     funding_filter_enabled: bool  = Field(True,   env="FUNDING_FILTER_ENABLED")
     funding_rate_limit:     float = Field(0.0005, env="FUNDING_RATE_LIMIT")
 
+    # ── Volatility-scaled position sizing ─────────────────────────────────────
+    # High DAILY ATR%-of-price trades keep positive expectancy but lower win-rate
+    # and a fat loss tail — and fare far worse live than in backtest (stop
+    # slippage, noise-swept stops). So size them DOWN rather than skip them
+    # (universe study: 1k v2 + 11k v1 trades). Curve via volatility_size_factor:
+    #   factor = clamp(1 - slope*(atr% - full), floor, 1.0)
+    #   atr% ≤ 8 → full size, 13 → 0.6×, 18 → floor 0.3×.
+    vol_size_full_atr_pct: float = Field(8.0,  env="VOL_SIZE_FULL_ATR_PCT")
+    vol_size_slope:        float = Field(0.08, env="VOL_SIZE_SLOPE")
+    vol_size_floor:        float = Field(0.3,  env="VOL_SIZE_FLOOR")
+    # Selection-time demotion only: rank coins whose daily atr% exceeds this lower
+    # in the rotation (scan_universe). Not an entry gate.
+    max_daily_atr_pct: float = Field(13.0, env="MAX_DAILY_ATR_PCT")
+
+    # ── Liquidity quality gate (coin selection) ───────────────────────────────
+    # Exclude / demote coins whose avg daily quote-volume (USDT) is below this
+    # floor. RIF traded ~$26M/day; every winner ≥ $38M/day. $30M splits them.
+    min_daily_quote_volume_musd: float = Field(30.0, env="MIN_DAILY_QUOTE_VOLUME_MUSD")
+
+    # ── Per-symbol risk memory (backstop) ─────────────────────────────────────
+    # Bench a symbol after this many stops over a rolling window — generalises
+    # the intraday cooldowns so spaced re-entries (RIF: 29h then 6d apart) can't
+    # slip through. 0 disables.
+    symbol_bench_window_days: float = Field(7.0, env="SYMBOL_BENCH_WINDOW_DAYS")
+    symbol_bench_max_stops:   int   = Field(3,   env="SYMBOL_BENCH_MAX_STOPS")
+
     # ── Macro event guard ─────────────────────────────────────────────────────
     # Block new entries within ± this many hours of scheduled macro events
     # (FOMC, CPI, ...) listed in data/macro_events.json.

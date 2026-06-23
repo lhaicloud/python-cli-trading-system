@@ -74,6 +74,10 @@ class SignalResult:
     short_score:      float = 0.0
     tf_scores:        list  = field(default_factory=list)
     rejection_reason: str | None = None
+    # Daily realized volatility (atr_14/close*100) at signal time — drives the
+    # volatility quality gate in SignalFilter. Rides on the dataclass so the
+    # filter has it in backtest (where it only receives df_30m).
+    daily_atr_pct:    float = 0.0
 
 
 def generate_signal(
@@ -130,6 +134,16 @@ def generate_signal(
         )
 
     current_price = float(df_30m["close"].iloc[-1])
+
+    # Daily realized volatility (atr%/price) for the volatility quality gate.
+    # Carried on the returned SignalResult so SignalFilter sees it in backtest
+    # (where the filter only receives df_30m). Defaults to 0 = fail-open.
+    daily_atr_pct = 0.0
+    if not df_1d.empty and "atr_pct" in df_1d.columns:
+        try:
+            daily_atr_pct = float(df_1d["atr_pct"].iloc[-1])
+        except Exception:
+            daily_atr_pct = 0.0
 
     # ── 1. Daily macro filter ─────────────────────────────────────────────────
     daily_trend = detect_trend_bias(df_1d) if not df_1d.empty else {"bias": "neutral", "details": ["No daily data"]}
@@ -273,7 +287,7 @@ def generate_signal(
 
     # ── 13. Final signal selection ────────────────────────────────────────────
     if buy_conf >= sell_conf and buy_conf >= min_conf and buy_zone:
-        return _build_buy_signal(
+        result = _build_buy_signal(
             symbol, buy_conf, buy_zone, buy_score_result,
             buy_sweep, buy_setup, pd_location,
             h4_bias, daily_bias, h1_conf["status"],
@@ -281,9 +295,11 @@ def generate_signal(
             reasons, warnings, data_quality,
             model_version=_buy_model_version,
         )
+        result.daily_atr_pct = daily_atr_pct
+        return result
 
     if sell_conf > buy_conf and sell_conf >= min_conf and sell_zone:
-        return _build_sell_signal(
+        result = _build_sell_signal(
             symbol, sell_conf, sell_zone, sell_score_result,
             sell_sweep, sell_setup, pd_location,
             h4_bias, daily_bias, h1_conf["status"],
@@ -291,6 +307,8 @@ def generate_signal(
             reasons, warnings, data_quality,
             model_version=_sell_model_version,
         )
+        result.daily_atr_pct = daily_atr_pct
+        return result
 
     return _hold(symbol, "No qualifying setup found", data_quality, reasons, warnings, regime)
 

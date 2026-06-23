@@ -29,6 +29,11 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["atr_14"] = atr(df["high"], df["low"], df["close"], 14)
     df["atr_7"]  = atr(df["high"], df["low"], df["close"], 7)
 
+    # ATR as % of price — realized-volatility / "governability" gauge. A zone-based
+    # stop (~1% risk) sits inside the daily noise band when this is large, so wild
+    # instruments get swept regardless of setup quality. Used by the volatility gate.
+    df["atr_pct"] = (df["atr_14"] / df["close"].replace(0, float("nan")) * 100).fillna(0.0)
+
     # RSI
     df["rsi_14"] = rsi(df["close"], 14)
 
@@ -79,6 +84,7 @@ def get_current_indicators(df: pd.DataFrame) -> dict:
         "ema_50":         float(last.get("ema_50", 0)),
         "ema_200":        float(last.get("ema_200", 0)),
         "atr_14":         float(last.get("atr_14", 0)),
+        "atr_pct":        float(last.get("atr_pct", 0)),
         "rsi_14":         float(last.get("rsi_14", 50)),
         "vol_ma_20":      float(last.get("vol_ma_20", 0)),
         "volume":         float(last.get("volume", 0)),

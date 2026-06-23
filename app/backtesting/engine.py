@@ -25,7 +25,7 @@ from app.ta.signals import generate_signal
 from app.paper.signal_filter import SignalFilter
 from app.backtesting.metrics import compute_metrics
 from app.utils.logger import get_logger
-from app.utils.math_utils import position_size, risk_reward
+from app.utils.math_utils import position_size, risk_reward, volatility_size_factor
 from app.ta.leverage import dynamic_leverage
 from app.utils.timeframes import dt_to_ms
 
@@ -33,7 +33,7 @@ logger = get_logger(__name__)
 
 # Tag written to backtest_runs.model_version. Validation (scan_universe)
 # only trusts runs produced by this engine version.
-ENGINE_VERSION = "rule_based_v2_realistic"
+ENGINE_VERSION = "rule_based_v3_volgate"
 
 _TF_LOOKBACK = {
     "1d":  365,   # candles of lookback for daily
@@ -482,7 +482,15 @@ def run_backtest(
             # Dynamic leverage + risk-based sizing
             lev      = dynamic_leverage(sig, recent_trades=closed_trades,
                                         max_leverage=cfg.max_leverage)
-            pos_size = position_size(capital, risk_pct, entry, sig.stop_loss,
+            # Volatility-scaled sizing (parity with live PositionManager): shrink
+            # risk on high daily-ATR% coins instead of vetoing them.
+            vol_factor = volatility_size_factor(
+                sig.daily_atr_pct,
+                full_atr_pct=cfg.vol_size_full_atr_pct,
+                slope=cfg.vol_size_slope,
+                floor=cfg.vol_size_floor,
+            )
+            pos_size = position_size(capital, risk_pct * vol_factor, entry, sig.stop_loss,
                                      leverage=lev)
             if pos_size <= 0 or sig.risk_reward < cfg.min_rr_ratio:
                 progress.advance(task)

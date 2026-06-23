@@ -452,6 +452,31 @@ def get_portfolio_stops_in_window(window_ms: int) -> int:
     return int(row[0]) if row else 0
 
 
+def get_symbol_risk_stats(symbol: str, window_ms: int, now_ms: int | None = None) -> tuple[int, float]:
+    """
+    Per-symbol risk memory over a rolling window: (stops, realized_pnl).
+
+    Generalises the intraday stop cooldowns to a multi-day horizon so a symbol
+    that keeps stopping out — even with entries spaced days apart, like RIFUSDT —
+    can be benched. `now_ms` lets backtests/tests pass a deterministic clock
+    (defaults to wall time).
+    """
+    ref_ms = now_ms if now_ms is not None else int(__import__("time").time() * 1000)
+    cutoff_ms = ref_ms - window_ms
+    sql = """
+        SELECT
+            COALESCE(SUM(CASE WHEN status='stopped' THEN 1 ELSE 0 END), 0) AS stops,
+            COALESCE(SUM(pnl), 0.0) AS realized
+        FROM paper_trades
+        WHERE symbol=? AND status != 'open' AND close_time >= ?
+    """
+    with get_conn() as conn:
+        row = conn.execute(sql, (symbol, cutoff_ms)).fetchone()
+    if not row:
+        return 0, 0.0
+    return int(row[0]), float(row[1])
+
+
 def get_zone_blacklist(symbol: str) -> list[dict]:
     """Return active (non-expired) blacklisted zone price levels for a symbol."""
     import json, time
