@@ -14,12 +14,13 @@ WorkingDirectory=/home/ubuntu/lqmtf
 Environment="PATH=/home/ubuntu/lqmtf/venv/bin:/usr/local/bin:/usr/bin:/bin"
 EnvironmentFile=/home/ubuntu/lqmtf/.env
 
-# Auto-select top symbols from universe and re-sync Binance top-50 on every
-# startup so new high-volume coins are backfilled automatically.
+# Auto-select top symbols from universe.
+# --sync removed: universe sync runs as a separate daily timer (lqmtf-sync.timer)
+# to avoid AutoBacktest background thread holding SQLite write locks and
+# causing candle updates to silently fail.
 # --rescan-every 144 = rotate watchlist every 3 days (144 × 30m candles).
 ExecStart=/home/ubuntu/lqmtf/venv/bin/python main.py live \
     --auto \
-    --sync \
     --auto-n 4 \
     --rescan-every 144 \
     --risk 1.0 \
