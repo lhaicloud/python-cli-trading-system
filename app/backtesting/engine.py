@@ -28,12 +28,9 @@ from app.utils.logger import get_logger
 from app.utils.math_utils import position_size, risk_reward, volatility_size_factor
 from app.ta.leverage import dynamic_leverage
 from app.utils.timeframes import dt_to_ms
+from app.version import ENGINE_VERSION
 
 logger = get_logger(__name__)
-
-# Tag written to backtest_runs.model_version. Validation (scan_universe)
-# only trusts runs produced by this engine version.
-ENGINE_VERSION = "rule_based_v3_volgate"
 
 _TF_LOOKBACK = {
     "1d":  365,   # candles of lookback for daily

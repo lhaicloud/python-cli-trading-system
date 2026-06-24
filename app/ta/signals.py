@@ -18,6 +18,8 @@ _USE_ML_MODEL = os.environ.get("DISABLE_ML_MODEL", "0") != "1"
 import numpy as np
 import pandas as pd
 
+from app.version import ENGINE_VERSION
+
 from app.config import get_settings
 from app.models.versioning import get_current_model_path
 from app.ta.indicators import add_indicators
@@ -65,7 +67,7 @@ class SignalResult:
     setup_type:       str   = ""
     reasons:          list  = field(default_factory=list)
     warnings:         list  = field(default_factory=list)
-    model_version:    str   = "rule_based_v1"
+    model_version:    str   = ENGINE_VERSION
     data_quality:     str   = "unknown"
     timestamp:        int   = field(default_factory=lambda: int(time.time() * 1000))
     zone_id:          int | None = None
@@ -235,8 +237,8 @@ def generate_signal(
     # (filters bad BUY signals) and least needed in strong trends (rules work well).
     # Multiplier controls max adjustment: factor=20 → ±10, factor=30 → ±15.
     _blend = _model_blend_factor(regime)
-    _buy_model_version  = "rule_based_v1"
-    _sell_model_version = "rule_based_v1"
+    _buy_model_version  = ENGINE_VERSION
+    _sell_model_version = ENGINE_VERSION
 
     if _USE_ML_MODEL and buy_conf > 0 and buy_zone and buy_score_result:
         _mf = _build_model_features(h4_bias, h1_conf["status"], buy_score_result,
@@ -596,7 +598,7 @@ def _build_buy_signal(
     h4_bias, daily_bias, h1_status,
     regime, current_price, capital,
     reasons, warnings, data_quality,
-    model_version: str = "rule_based_v1",
+    model_version: str = ENGINE_VERSION,
 ) -> SignalResult:
     entry = sr.get("entry", zone_midpoint(zone))
     sl    = sr.get("sl", zone["zone_bottom"] * 0.999)
@@ -649,7 +651,7 @@ def _build_sell_signal(
     h4_bias, daily_bias, h1_status,
     regime, current_price, capital,
     reasons, warnings, data_quality,
-    model_version: str = "rule_based_v1",
+    model_version: str = ENGINE_VERSION,
 ) -> SignalResult:
     entry = sr.get("entry", zone_midpoint(zone))
     sl    = sr.get("sl", zone["zone_top"] * 1.001)
