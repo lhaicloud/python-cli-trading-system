@@ -24,6 +24,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
 
+from app.config import get_settings
 from app.data.backfill import update_latest
 from app.data.repository import (
     get_candles,
@@ -128,7 +129,13 @@ class LiveWatcher:
                 set_paper_capital(sym, paper_capital)
 
         # Core components
-        self._pm     = PositionManager(self.symbols, risk_pct=risk_pct)
+        cfg = get_settings()
+        self._pm     = PositionManager(
+            self.symbols,
+            risk_pct=risk_pct,
+            max_portfolio=cfg.max_portfolio,
+            max_same_dir=cfg.max_same_dir,
+        )
         self._filter = SignalFilter()
         self._monitor = PriceMonitor(
             symbols          = self.symbols,
@@ -554,7 +561,6 @@ class LiveWatcher:
         if sig.signal in ("BUY", "SELL"):
             from app.ta.leverage import dynamic_leverage
             from app.data.repository import get_recent_closed_paper_trades
-            from app.config import get_settings
             _lev = dynamic_leverage(
                 sig,
                 recent_trades=get_recent_closed_paper_trades(symbol, 5),
@@ -583,7 +589,6 @@ class LiveWatcher:
                     pos_size = float(opened[0]["position_size"]) if opened else 0.0
                     from app.ta.leverage import dynamic_leverage
                     from app.data.repository import get_recent_closed_paper_trades
-                    from app.config import get_settings
                     _lev = dynamic_leverage(
                         sig,
                         recent_trades=get_recent_closed_paper_trades(symbol, 5),
@@ -645,7 +650,6 @@ class LiveWatcher:
         if sig.signal in ("BUY", "SELL"):
             from app.ta.leverage import dynamic_leverage
             from app.data.repository import get_recent_closed_paper_trades
-            from app.config import get_settings
             _lev = dynamic_leverage(
                 sig,
                 recent_trades=get_recent_closed_paper_trades(symbol, 5),

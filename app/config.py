@@ -99,8 +99,12 @@ class Settings(BaseSettings):
 
     # ── Portfolio risk budget ─────────────────────────────────────────────────
     # Total capital_at_risk across ALL open positions may not exceed this % of
-    # portfolio equity. With 1% risk/trade this allows ~3 concurrent positions.
-    max_open_risk_pct: float = Field(3.0, env="MAX_OPEN_RISK_PCT")
+    # portfolio equity. With 1% risk/trade and max_portfolio=5 allows 5 concurrent.
+    max_open_risk_pct: float = Field(5.0, env="MAX_OPEN_RISK_PCT")
+    # Hard cap on concurrent open trades (should match watchlist size COINS_PER_DAY).
+    max_portfolio: int = Field(5, env="MAX_PORTFOLIO")
+    # Max trades allowed in the same direction (set equal to max_portfolio to disable).
+    max_same_dir: int = Field(5, env="MAX_SAME_DIR")
     # Risk scaling for additional same-direction positions (crypto is one big
     # BTC trade): 1st position 100% risk, 2nd 70%, 3rd+ 50%.
     corr_risk_scale: list[float] = [1.0, 0.7, 0.5]
