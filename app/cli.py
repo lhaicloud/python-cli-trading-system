@@ -736,6 +736,7 @@ def live(
     rescan_n: int = typer.Option(0, "--rescan-n", help="Symbols to select on each rescan (0 = all validated, default)"),
     rescan_validated: bool = typer.Option(True, "--rescan-validated/--rescan-all", help="Rescan from validated symbols only (default: validated only)"),
     live_execution: bool = typer.Option(False, "--live-execution", help="Execute real orders on Binance Futures (requires BINANCE_API_KEY/SECRET in .env)"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt (for nohup/background use)"),
 ) -> None:
     """
     Run the live auto-signal watcher (single or multi-symbol).
@@ -798,7 +799,7 @@ def live(
         console.print(f"   Max lev:  {cfg.live_max_leverage}×")
         console.print()
 
-        if not dry_run:
+        if not dry_run and not yes:
             confirm = typer.confirm("Real orders will be placed on Binance Futures. Continue?")
             if not confirm:
                 console.print("[dim]Aborted.[/dim]")
