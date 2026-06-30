@@ -735,6 +735,7 @@ def live(
     rescan_every: int = typer.Option(144, "--rescan-every", help="Re-run universe scanner every N cycles to rotate coins mid-session (0=off, 144=every 3 days on 30m tf). Symbols with open trades are pinned until the trade closes."),
     rescan_n: int = typer.Option(0, "--rescan-n", help="Symbols to select on each rescan (0 = all validated, default)"),
     rescan_validated: bool = typer.Option(True, "--rescan-validated/--rescan-all", help="Rescan from validated symbols only (default: validated only)"),
+    live_execution: bool = typer.Option(False, "--live-execution", help="Execute real orders on Binance Futures (requires BINANCE_API_KEY/SECRET in .env)"),
 ) -> None:
     """
     Run the live auto-signal watcher (single or multi-symbol).
@@ -760,9 +761,74 @@ def live(
     symbol in sequence. Press Ctrl+C to stop gracefully.
     """
     _init()
-    from app.live.watcher import LiveWatcher
-
     import sys; sys.path.insert(0, ".")
+
+    # ── Live execution branch ─────────────────────────────────────────────────
+    if live_execution:
+        from app.live.live_watcher import LiveTradingWatcher
+        from app.config import get_settings as _cfg
+
+        cfg = _cfg()
+        if not cfg.binance_api_key or not cfg.binance_api_secret:
+            console.print(
+                "[bold red]ERROR[/bold red] BINANCE_API_KEY and BINANCE_API_SECRET "
+                "must be set in .env before using --live-execution"
+            )
+            raise typer.Exit(1)
+
+        # Fetch balance for the confirmation prompt
+        from app.live.exchange import BinanceExchangeClient
+        _client = BinanceExchangeClient(
+            api_key    = cfg.binance_api_key,
+            api_secret = cfg.binance_api_secret,
+            testnet    = cfg.binance_testnet,
+        )
+        try:
+            _balance = _client.get_balance()
+        except Exception as exc:
+            console.print(f"[bold red]ERROR[/bold red] Could not connect to Binance: {exc}")
+            raise typer.Exit(1)
+
+        net_label = "TESTNET (safe)" if cfg.binance_testnet else "[bold red]MAINNET — REAL MONEY[/bold red]"
+        console.print()
+        console.print(f"[bold red]⚠  LIVE EXECUTION MODE[/bold red]")
+        console.print(f"   Network:  {net_label}")
+        console.print(f"   Balance:  ${_balance:,.2f} USDT")
+        console.print(f"   Risk:     {cfg.live_risk_pct}% per trade")
+        console.print(f"   Max lev:  {cfg.live_max_leverage}×")
+        console.print()
+
+        if not dry_run:
+            confirm = typer.confirm("Real orders will be placed on Binance Futures. Continue?")
+            if not confirm:
+                console.print("[dim]Aborted.[/dim]")
+                raise typer.Exit(0)
+
+        if auto:
+            from scan_universe import select_watchlist
+            selected = select_watchlist(
+                n=auto_n,
+                validated_only=auto_validated,
+                fallback_symbols=list(symbols),
+                verbose=True,
+            )
+        else:
+            selected = list(symbols)
+
+        live_watcher = LiveTradingWatcher(
+            symbols          = selected,
+            exec_timeframe   = timeframe,
+            heartbeat_every  = heartbeat,
+            dry_run          = dry_run,
+            rescan_every     = rescan_every,
+            rescan_n         = rescan_n,
+            rescan_validated = rescan_validated,
+        )
+        live_watcher.run()
+        return
+
+    # ── Paper watcher branch (default) ───────────────────────────────────────
+    from app.live.watcher import LiveWatcher
 
     # Optional: sync universe from Binance, then auto-backtest any new coins
     # Backtests run in a background thread so the watcher starts immediately

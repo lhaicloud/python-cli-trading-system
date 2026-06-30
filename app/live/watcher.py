@@ -27,6 +27,7 @@ from rich.rule import Rule
 from app.config import get_settings
 from app.data.backfill import update_latest
 from app.data.repository import (
+    get_all_open_paper_trades,
     get_candles,
     get_latest_signal,
     save_signal,
@@ -104,6 +105,17 @@ class LiveWatcher:
         rotation_history_file: str | None = None,
     ) -> None:
         self.symbols           = [s.upper() for s in symbols]
+
+        # Pin any symbols that have open DB trades but aren't in the watchlist.
+        # Without this, a restarted watcher silently ignores open positions whose
+        # symbol was dropped from the auto-selected list.
+        _db_open_syms = {t["symbol"] for t in get_all_open_paper_trades()}
+        _pinned = sorted(_db_open_syms - set(self.symbols))
+        if _pinned:
+            logger.warning("[Live] Pinning %s — open trades in DB not in current watchlist", _pinned)
+            console.print(f"  [yellow]⚠ Auto-pinning {_pinned} — open trades exist but symbol not in watchlist[/yellow]")
+            self.symbols = self.symbols + _pinned
+
         self.exec_tf           = exec_timeframe
         self.heartbeat_every   = heartbeat_every
         self.risk_pct          = risk_pct

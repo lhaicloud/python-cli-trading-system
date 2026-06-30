@@ -63,9 +63,29 @@ class Settings(BaseSettings):
     backtest_min_trades:   int   = Field(5,    env="BACKTEST_MIN_TRADES")     # at least 5 trades
     backtest_min_profit:   float = Field(0.0,  env="BACKTEST_MIN_PROFIT")     # > 0
 
-    # Telegram notifications
+    # Telegram notifications (paper)
     telegram_bot_token: str = ""
     telegram_chat_id: str   = ""
+
+    # ── Binance live execution ─────────────────────────────────────────────────
+    binance_api_key:    str  = Field("", env="BINANCE_API_KEY")
+    binance_api_secret: str  = Field("", env="BINANCE_API_SECRET")
+    # Set BINANCE_TESTNET=true to use testnet.binancefuture.com
+    binance_testnet:    bool = Field(False, env="BINANCE_TESTNET")
+
+    # ── Live trading parameters (fully independent from paper) ─────────────────
+    live_risk_pct:           float = Field(1.0,  env="LIVE_RISK_PCT")
+    live_max_portfolio:      int   = Field(3,    env="LIVE_MAX_PORTFOLIO")
+    live_max_same_dir:       int   = Field(2,    env="LIVE_MAX_SAME_DIR")
+    live_max_daily_loss_pct: float = Field(3.0,  env="LIVE_MAX_DAILY_LOSS_PCT")
+    # Leverage: start at 1 (testnet). After verification set to 10.
+    # dynamic_leverage() scales 1×–N× based on confidence, zone, R:R, regime.
+    # 3+ consecutive losses always forces back to 1× regardless of this ceiling.
+    live_max_leverage:       int   = Field(1,    env="LIVE_MAX_LEVERAGE")
+
+    # ── Live Telegram channel (separate from paper channel) ────────────────────
+    live_telegram_token:   str = Field("", env="LIVE_TELEGRAM_TOKEN")
+    live_telegram_chat_id: str = Field("", env="LIVE_TELEGRAM_CHAT_ID")
 
     # Supported timeframes in ascending order
     supported_timeframes: list[str] = ["1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d", "1w"]

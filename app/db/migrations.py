@@ -65,5 +65,48 @@ def run_migrations() -> None:
                 created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # ── Live trades table ─────────────────────────────────────────────────
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS live_trades (
+                id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol                  TEXT    NOT NULL,
+                signal_id               INTEGER,
+                direction               TEXT,
+                status                  TEXT    DEFAULT 'open',
+                entry_price             REAL,
+                stop_loss               REAL,
+                take_profit             REAL,
+                partial_tp_price        REAL,
+                position_size           REAL,
+                remaining_size          REAL,
+                capital_at_risk         REAL,
+                risk_reward             REAL,
+                leverage                INTEGER DEFAULT 1,
+                open_time               INTEGER,
+                close_time              INTEGER,
+                close_price             REAL,
+                pnl                     REAL    DEFAULT 0,
+                pnl_pct                 REAL    DEFAULT 0,
+                partial_taken           INTEGER DEFAULT 0,
+                partial_pnl             REAL    DEFAULT 0,
+                max_favorable_excursion REAL,
+                max_adverse_excursion   REAL,
+                original_risk           REAL,
+                exchange_entry_id       TEXT,
+                exchange_sl_id          TEXT,
+                exchange_tp_id          TEXT,
+                model_version           TEXT,
+                created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_live_trades_status
+                ON live_trades(status)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_live_trades_symbol
+                ON live_trades(symbol, status)
+        """)
         conn.commit()
     logger.info("Migrations complete.")
