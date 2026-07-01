@@ -34,6 +34,7 @@ from app.data.repository import (
 )
 from app.notifications.telegram import (
     notify_error,
+    notify_ratchet_update,
     notify_trade_closed,
     notify_trade_opened,
     notify_signal,
@@ -43,6 +44,7 @@ from app.paper.account import get_paper_capital, get_portfolio_capital, set_pape
 from app.paper.position_manager import PositionManager
 from app.paper.signal_filter import SignalFilter
 from app.live.price_monitor import PriceMonitor
+from app.ta.indicators import add_indicators
 from app.ta.signals import generate_signal, SignalResult
 from app.utils.logger import get_logger
 from app.utils.timeframes import ms_to_dt, tf_to_ms
@@ -511,11 +513,17 @@ class LiveWatcher:
             console.print(f"  [yellow]No 30M data for {symbol} — skipping[/yellow]")
             return None
 
+        # Enrich once here (ATR etc.) — generate_signal() enriches its own
+        # local copy internally, so this doesn't get duplicated (its _needs()
+        # check sees these columns already present and skips recomputing).
+        df_30m = add_indicators(df_30m)
+
         # Current candle's OHLC for intrabar-aware SL/TP check
         last = df_30m.iloc[-1]
         current_price = float(last["close"])
         candle_high   = float(last["high"])
         candle_low    = float(last["low"])
+        atr           = float(last.get("atr_14", 0)) or 0.0
         console.print(f"  Price: [bold yellow]{current_price:,.4f}[/bold yellow]  "
                       f"[dim]H={candle_high:,.4f}  L={candle_low:,.4f}[/dim]")
 
@@ -530,7 +538,9 @@ class LiveWatcher:
                 )
 
         # 3b. Check open trades using candle high/low (intrabar SL/TP)
-        closed = self._pm.check_candle(symbol, candle_high, candle_low, current_price)
+        closed, ratcheted = self._pm.check_candle(
+            symbol, candle_high, candle_low, current_price, atr=atr
+        )
         for t in closed:
             pnl    = t.get("pnl", 0)
             status = t.get("status", "closed")
@@ -542,6 +552,12 @@ class LiveWatcher:
                 f"Capital=${capital:,.2f}[/{color}]"
             )
             notify_trade_closed(t, symbol, leverage=int(t.get("leverage") or 1))
+        for r in ratcheted:
+            console.print(
+                f"  [cyan]Stop ratcheted to level {r['new_level']} "
+                f"@ {r['new_sl']:.6f}[/cyan]"
+            )
+            notify_ratchet_update(r["trade"], symbol, r["new_sl"], r["new_level"])
 
         # 4. Generate signal
         capital = get_paper_capital(symbol)

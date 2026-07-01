@@ -319,6 +319,17 @@ def apply_partial_tp(trade_id: int, new_size: float, partial_pnl: float) -> None
         )
 
 
+def update_paper_trade_stop(trade_id: int, stop_loss: float, ratchet_level: int) -> None:
+    """Persist a ratcheted stop-loss level (only ever tightens, never loosens)."""
+    with get_conn() as conn:
+        conn.execute(
+            """UPDATE paper_trades
+               SET stop_loss=?, ratchet_level=?, updated_at=CURRENT_TIMESTAMP
+               WHERE id=? AND status='open'""",
+            (round(stop_loss, 6), ratchet_level, trade_id),
+        )
+
+
 # ── Funding rates ──────────────────────────────────────────────────────────────
 
 def save_funding_rates(symbol: str, rows: list[dict]) -> int:

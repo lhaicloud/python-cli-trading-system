@@ -44,6 +44,7 @@ from app.data.repository import (
     open_paper_trade,
     save_feature_snapshot,
     update_open_paper_trade_pnl,
+    update_paper_trade_stop,
     update_pending_order_status,
 )
 from app.paper.account import (
@@ -51,6 +52,7 @@ from app.paper.account import (
     update_capital_after_trade,
 )
 from app.paper.broker import simulate_fill
+from app.ta.exit_engine import apply_ratchet, build_ratchet_levels
 from app.ta.leverage import dynamic_leverage
 from app.utils.logger import get_logger
 from app.utils.math_utils import position_size, volatility_size_factor
@@ -554,8 +556,13 @@ class PositionManager:
         """
         Check open trades against a single price point (e.g. a tick or
         an intraday poll).  Equivalent to check_candle with high=low=close.
+
+        No ATR is available for a bare price tick, so the ratchet trailing
+        stop does not advance here — it only advances on check_candle(),
+        which runs once per 30-m candle close with a real ATR reading.
         """
-        return self._evaluate(symbol, high=price, low=price, close=price)
+        closed, _ratcheted = self._evaluate(symbol, high=price, low=price, close=price)
+        return closed
 
     def check_candle(
         self,
@@ -563,14 +570,22 @@ class PositionManager:
         high: float,
         low: float,
         close: float,
-    ) -> list[dict]:
+        atr: float | None = None,
+    ) -> tuple[list[dict], list[dict]]:
         """
         Check open trades against a completed candle.
         Uses high/low for SL/TP detection (catches wicks) and close for
         MFE/MAE.  If a candle trips both SL and TP, the stop takes priority —
         intrabar order is unknown from H/L alone, so be conservative.
+
+        `atr` (14-period ATR of the same candle) drives the ratchet trailing
+        stop; pass it to advance the stop toward breakeven/locked-profit/ATR
+        trail as the trade moves through +1R/+2R/+3R/+4R. Returns
+        (closed_trades, ratchet_events) — ratchet_events is a list of
+        {"trade", "new_sl", "new_level"} dicts, one per trade whose stop
+        tightened to a new level this cycle.
         """
-        return self._evaluate(symbol, high=high, low=low, close=close)
+        return self._evaluate(symbol, high=high, low=low, close=close, atr=atr)
 
     def _evaluate(
         self,
@@ -578,7 +593,8 @@ class PositionManager:
         high: float,
         low: float,
         close: float,
-    ) -> list[dict]:
+        atr: float | None = None,
+    ) -> tuple[list[dict], list[dict]]:
         """
         Core evaluation loop — thread-safe via lock so the price monitor
         and the 30-m signal thread cannot double-close the same trade.
@@ -587,6 +603,7 @@ class PositionManager:
         fee_pct = cfg.backtest_fee_pct / 100
         max_age_ms = int(cfg.max_trade_age_hours * 3_600_000)
         closed: list[dict] = []
+        ratcheted: list[dict] = []
 
         with self._lock:
             open_trades = get_open_paper_trades(symbol)
@@ -599,6 +616,38 @@ class PositionManager:
                 sl        = float(trade["stop_loss"])
                 tp        = float(trade["take_profit"])
                 pos_size  = float(trade["position_size"])
+                risk0     = float(trade.get("original_risk") or 0) or abs(entry - sl)
+
+                # Ratchet trailing stop: +1R->BE, +2R->lock 0.75R, +3R->lock
+                # 1.5R, +4R+->ATR trail. Only advances on candle closes (atr
+                # is None on bare ticks from check_price). Stop only ever
+                # tightens, never loosens — see app/ta/exit_engine.py.
+                if cfg.mtf_ratchet_enabled and atr is not None and risk0 > 0:
+                    ratchet_levels = build_ratchet_levels(entry, sl, direction)
+                    old_level = int(trade.get("ratchet_level") or 0)
+                    new_sl, new_level = apply_ratchet(
+                        direction=direction,
+                        original_risk=risk0,
+                        current_sl=sl,
+                        candle_high=high,
+                        candle_low=low,
+                        atr=atr,
+                        ratchet_level=old_level,
+                        ratchet_levels=ratchet_levels,
+                        entry=entry,
+                    )
+                    if new_sl != sl or new_level != old_level:
+                        update_paper_trade_stop(trade["id"], new_sl, new_level)
+                        sl = new_sl
+                        trade = {**trade, "stop_loss": new_sl, "ratchet_level": new_level}
+                        if new_level > old_level:
+                            ratcheted.append(
+                                {"trade": trade, "new_sl": new_sl, "new_level": new_level}
+                            )
+                            logger.info(
+                                "[PM][%s] Ratchet %s: level %d -> SL %.6f",
+                                symbol, direction, new_level, new_sl,
+                            )
 
                 # Intrabar SL/TP using candle extremes
                 if direction == "BUY":
@@ -611,7 +660,6 @@ class PositionManager:
                 # Partial take-profit at +partial_tp_r R. Skipped when the stop
                 # (conservative: assume it came first) or the full TP (the full
                 # exit supersedes) also sits inside this range.
-                risk0 = float(trade.get("original_risk") or 0) or abs(entry - sl)
                 if (
                     cfg.partial_tp_enabled
                     and not trade.get("partial_taken")
@@ -711,7 +759,7 @@ class PositionManager:
                 update_capital_after_trade(symbol, result["pnl_increment"])
                 closed.append(result)
 
-        return closed
+        return closed, ratcheted
 
     # ── Emergency close ───────────────────────────────────────────────────────
 

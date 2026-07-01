@@ -137,6 +137,18 @@ def notify_trade_closed(trade: dict, symbol: str, leverage: int = 1) -> bool:
     return send_message(text)
 
 
+def notify_ratchet_update(trade: dict, symbol: str, new_sl: float, level: int) -> bool:
+    """Notify when the trailing stop ratchets to a new level."""
+    labels = {1: "Breakeven", 2: "Lock 0.75R", 3: "Lock 1.5R", 4: "ATR Trail"}
+    text = (
+        f"\U0001f512 <b>Stop Ratcheted — {symbol}</b>\n\n"
+        f"Level:  <b>{labels.get(level, level)}</b>\n"
+        f"New SL: <code>{new_sl:.6f}</code>\n"
+        f"Entry:  <code>{trade.get('entry_price', 0):.4f}</code>"
+    )
+    return send_message(text)
+
+
 def notify_error(context: str, error: str) -> bool:
     text = f"⚠️ <b>LQ-MTF Error</b>\n\n<i>{context}</i>\n\n<code>{error[:300]}</code>"
     return send_message(text)
