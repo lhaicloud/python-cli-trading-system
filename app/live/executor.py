@@ -319,6 +319,65 @@ class LiveExecutor:
             if new_sl:
                 self._client.cancel_algo_order(symbol, new_sl.get("algoId", ""))
 
+            # Remaining size now has no bracket resting on the exchange —
+            # market-close it immediately rather than leaving it naked
+            # (e.g. price already crossed break-even by the time we tried
+            # to replace the bracket, so Binance rejects the new SL with
+            # -2021 "Order would immediately trigger").
+            close_side  = "SELL" if direction == "BUY" else "BUY"
+            close_price = None
+            try:
+                close_resp  = self._client.place_market_order(symbol, close_side, remaining)
+                close_price = float(close_resp.get("avgPrice") or 0) or None
+            except Exception as close_exc:
+                logger.critical(
+                    "[Executor] %s emergency close of naked remainder FAILED: %s — "
+                    "position may still be open and UNPROTECTED, manual intervention required  id=%d",
+                    symbol, close_exc, live_trade_id,
+                )
+
+            if close_price is not None:
+                if direction == "BUY":
+                    remain_pnl = (close_price - entry_price) * remaining
+                else:
+                    remain_pnl = (entry_price - close_price) * remaining
+                total_pnl = partial_pnl + remain_pnl
+            else:
+                total_pnl = None
+
+            with get_conn() as conn:
+                conn.execute(
+                    """
+                    UPDATE live_trades SET
+                        partial_taken  = 1,
+                        partial_pnl    = ?,
+                        status         = ?,
+                        close_price    = ?,
+                        close_time     = ?,
+                        pnl            = ?,
+                        exchange_sl_id = '',
+                        exchange_tp_id = '',
+                        updated_at     = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (
+                        partial_pnl,
+                        "closed" if close_price is not None else "open",
+                        close_price,
+                        _now_ms() if close_price is not None else None,
+                        total_pnl,
+                        live_trade_id,
+                    ),
+                )
+                conn.commit()
+
+            logger.warning(
+                "[Executor] %s partial TP filled but bracket replace failed — "
+                "remainder emergency-closed  pnl=%s  id=%d",
+                symbol, f"{total_pnl:.2f}" if total_pnl is not None else "UNKNOWN", live_trade_id,
+            )
+            return
+
         with get_conn() as conn:
             conn.execute(
                 """
