@@ -329,6 +329,20 @@ class LiveExecutor:
             try:
                 close_resp  = self._client.place_market_order(symbol, close_side, remaining)
                 close_price = float(close_resp.get("avgPrice") or 0) or None
+                if close_price is None:
+                    # Market order accepted but the response didn't carry a
+                    # synchronous fill price (common on testnet, sometimes
+                    # on mainnet) -- poll briefly for the real fill rather
+                    # than treating an accepted order as a failed close.
+                    close_order_id = close_resp.get("orderId")
+                    for _ in range(5):
+                        time.sleep(0.5)
+                        q = self._client._request("GET", "/fapi/v1/order", {
+                            "symbol": symbol, "orderId": close_order_id,
+                        })
+                        close_price = float(q.get("avgPrice") or 0) or None
+                        if close_price:
+                            break
             except Exception as close_exc:
                 logger.critical(
                     "[Executor] %s emergency close of naked remainder FAILED: %s — "
