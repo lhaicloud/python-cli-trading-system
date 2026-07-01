@@ -220,7 +220,7 @@ class LiveExecutor:
                 logger.error("[Executor] %s bracket placement failed: %s — emergency close", symbol, exc)
                 # Cancel whatever was placed
                 if sl_order:
-                    self._client.cancel_order(symbol, sl_order.get("orderId", ""))
+                    self._client.cancel_algo_order(symbol, sl_order.get("algoId", ""))
                 # Close position immediately
                 close_side = "SELL" if sig.signal == "BUY" else "BUY"
                 try:
@@ -252,8 +252,8 @@ class LiveExecutor:
                         position_size, remaining_size, capital_at_risk,
                         rr, leverage, open_time,
                         exchange_entry_id,
-                        str(sl_order.get("orderId", "")),
-                        str(tp_order.get("orderId", "")),
+                        str(sl_order.get("algoId", "")),
+                        str(tp_order.get("algoId", "")),
                         capital_at_risk,
                         getattr(sig, "model_version", None),
                     ),
@@ -303,7 +303,7 @@ class LiveExecutor:
 
         # Cancel original SL
         if old_sl_id:
-            self._client.cancel_order(symbol, old_sl_id)
+            self._client.cancel_algo_order(symbol, old_sl_id)
 
         # New bracket: BE stop + final TP
         bracket_side = "SELL" if direction == "BUY" else "BUY"
@@ -317,7 +317,7 @@ class LiveExecutor:
         except Exception as exc:
             logger.error("[Executor] %s bracket replace after partial TP failed: %s", symbol, exc)
             if new_sl:
-                self._client.cancel_order(symbol, new_sl.get("orderId", ""))
+                self._client.cancel_algo_order(symbol, new_sl.get("algoId", ""))
 
         with get_conn() as conn:
             conn.execute(
@@ -332,8 +332,8 @@ class LiveExecutor:
                 """,
                 (
                     partial_pnl,
-                    str(new_sl.get("orderId", "")) if new_sl else "",
-                    str(new_tp.get("orderId", "")) if new_tp else "",
+                    str(new_sl.get("algoId", "")) if new_sl else "",
+                    str(new_tp.get("algoId", "")) if new_tp else "",
                     live_trade_id,
                 ),
             )
@@ -342,8 +342,8 @@ class LiveExecutor:
         logger.info(
             "[Executor] %s partial TP @ %.4f  qty=%.6f  pnl=%.2f  BE-SL=%s  finalTP=%s",
             symbol, fill_price, filled_qty, partial_pnl,
-            new_sl.get("orderId", "?") if new_sl else "FAILED",
-            new_tp.get("orderId", "?") if new_tp else "FAILED",
+            new_sl.get("algoId", "?") if new_sl else "FAILED",
+            new_tp.get("algoId", "?") if new_tp else "FAILED",
         )
 
     def handle_sl_hit(self, live_trade_id: int, fill_price: float) -> None:
@@ -376,7 +376,7 @@ class LiveExecutor:
         # Cancel whichever bracket order is still resting
         other_id = tp_id if status == "stopped" else sl_id
         if other_id:
-            self._client.cancel_order(symbol, other_id)
+            self._client.cancel_algo_order(symbol, other_id)
 
         # Remaining PnL
         if direction == "BUY":
@@ -437,12 +437,12 @@ class LiveExecutor:
                     continue
 
                 try:
-                    open_orders = self._client.get_open_orders(symbol)
+                    open_orders = self._client.get_open_algo_orders(symbol)
                 except Exception as exc:
                     logger.warning("[Executor] sync_open_orders %s fetch failed: %s", symbol, exc)
                     continue
 
-                open_ids = {str(o["orderId"]) for o in open_orders}
+                open_ids = {str(o["algoId"]) for o in open_orders}
                 sl_present = sl_id in open_ids
                 tp_present = tp_id in open_ids
 
@@ -468,13 +468,11 @@ class LiveExecutor:
             if not order_id:
                 continue
             try:
-                resp = self._client._request("GET", "/fapi/v1/order", {
-                    "symbol":  symbol,
-                    "orderId": order_id,
-                })
-                if resp.get("status") == "FILLED":
-                    fill = float(resp.get("avgPrice") or resp.get("stopPrice") or 0)
-                    if fill:
+                resp = self._client.get_algo_order(symbol, order_id)
+                if resp.get("algoStatus") == "FINISHED":
+                    fill = float(resp.get("actualPrice") or resp.get("triggerPrice") or 0)
+                    qty  = float(resp.get("actualQty") or 0)
+                    if fill and qty:
                         self._close_trade(trade["id"], fill, status_name)
                         return
             except Exception as exc:
@@ -492,6 +490,16 @@ class LiveExecutor:
         """
         with self._lock:
             self._client.cancel_all_orders(symbol)
+
+            # cancel_all_orders only purges the regular order book — algo/
+            # conditional (bracket) orders live in a separate order book and
+            # must be cancelled explicitly, or a stale SL/TP could later
+            # trigger against a new position on the same symbol.
+            try:
+                for algo in self._client.get_open_algo_orders(symbol):
+                    self._client.cancel_algo_order(symbol, algo.get("algoId", ""))
+            except Exception as exc:
+                logger.warning("[Executor] emergency_close %s algo cleanup failed: %s", symbol, exc)
 
             pos = self._client.get_position(symbol)
             if pos is None:

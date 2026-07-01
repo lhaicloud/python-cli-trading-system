@@ -38,6 +38,8 @@ _WEIGHTS: dict[str, int] = {
     "/fapi/v2/positionRisk":    5,
     "/fapi/v1/positionSide/dual": 1,
     "/fapi/v1/exchangeInfo":    40,
+    "/fapi/v1/algoOrder":       1,
+    "/fapi/v1/openAlgoOrders":  1,
 }
 
 
@@ -225,20 +227,21 @@ class BinanceExchangeClient:
         stop_price: float,
         quantity: float,
     ) -> dict:
-        """Place a STOP_MARKET order (reduceOnly=True)."""
+        """Place a STOP_MARKET conditional order via the Algo Order API (reduceOnly=True)."""
         params = {
+            "algoType":         "CONDITIONAL",
             "symbol":           symbol,
             "side":             side,
             "type":             "STOP_MARKET",
-            "stopPrice":        self.round_price(symbol, stop_price),
+            "triggerPrice":     self.round_price(symbol, stop_price),
             "quantity":         quantity,
             "reduceOnly":       "true",
             "workingType":      "MARK_PRICE",
         }
-        result = self._request("POST", "/fapi/v1/order", params)
+        result = self._request("POST", "/fapi/v1/algoOrder", params)
         logger.info(
-            "[Exchange] STOP_MARKET %s %s qty=%s  stop=%s  id=%s",
-            side, symbol, quantity, stop_price, result.get("orderId"),
+            "[Exchange] STOP_MARKET %s %s qty=%s  stop=%s  algoId=%s",
+            side, symbol, quantity, stop_price, result.get("algoId"),
         )
         return result
 
@@ -249,20 +252,21 @@ class BinanceExchangeClient:
         stop_price: float,
         quantity: float,
     ) -> dict:
-        """Place a TAKE_PROFIT_MARKET order (reduceOnly=True)."""
+        """Place a TAKE_PROFIT_MARKET conditional order via the Algo Order API (reduceOnly=True)."""
         params = {
+            "algoType":    "CONDITIONAL",
             "symbol":      symbol,
             "side":        side,
             "type":        "TAKE_PROFIT_MARKET",
-            "stopPrice":   self.round_price(symbol, stop_price),
+            "triggerPrice": self.round_price(symbol, stop_price),
             "quantity":    quantity,
             "reduceOnly":  "true",
             "workingType": "MARK_PRICE",
         }
-        result = self._request("POST", "/fapi/v1/order", params)
+        result = self._request("POST", "/fapi/v1/algoOrder", params)
         logger.info(
-            "[Exchange] TAKE_PROFIT_MARKET %s %s qty=%s  tp=%s  id=%s",
-            side, symbol, quantity, stop_price, result.get("orderId"),
+            "[Exchange] TAKE_PROFIT_MARKET %s %s qty=%s  tp=%s  algoId=%s",
+            side, symbol, quantity, stop_price, result.get("algoId"),
         )
         return result
 
@@ -277,6 +281,27 @@ class BinanceExchangeClient:
         except Exception as exc:
             logger.warning("[Exchange] Cancel order %s failed: %s", order_id, exc)
             return {}
+
+    def cancel_algo_order(self, symbol: str, algo_id: int | str) -> dict:
+        try:
+            result = self._request("DELETE", "/fapi/v1/algoOrder", {
+                "symbol": symbol,
+                "algoId": algo_id,
+            })
+            logger.debug("[Exchange] Cancelled algo order %s for %s", algo_id, symbol)
+            return result
+        except Exception as exc:
+            logger.warning("[Exchange] Cancel algo order %s failed: %s", algo_id, exc)
+            return {}
+
+    def get_algo_order(self, symbol: str, algo_id: int | str) -> dict:
+        return self._request("GET", "/fapi/v1/algoOrder", {
+            "symbol": symbol,
+            "algoId": algo_id,
+        })
+
+    def get_open_algo_orders(self, symbol: str) -> list[dict]:
+        return self._request("GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol})
 
     def cancel_all_orders(self, symbol: str) -> None:
         try:

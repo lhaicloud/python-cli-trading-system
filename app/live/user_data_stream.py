@@ -1,9 +1,12 @@
 """
-Binance Futures User Data Stream — ORDER_TRADE_UPDATE listener.
+Binance Futures User Data Stream — ORDER_TRADE_UPDATE + ALGO_UPDATE listener.
 
 Runs in a daemon thread. On each fill event it dispatches to LiveExecutor.
-On disconnect it obtains a new listenKey, reconnects, and runs a catch-up
-query to find any fills that arrived during the outage.
+Market order fills (entry, emergency close) arrive via ORDER_TRADE_UPDATE;
+bracket (SL/TP) fills arrive via the separate ALGO_UPDATE event since Binance
+moved conditional orders to the Algo Order API. On disconnect it obtains a
+new listenKey, reconnects, and runs a catch-up query to find any fills that
+arrived during the outage.
 """
 
 from __future__ import annotations
@@ -149,12 +152,12 @@ class UserDataStream:
                 tp_id  = str(trade.get("exchange_tp_id") or "")
 
                 try:
-                    open_orders = self._client.get_open_orders(symbol)
+                    open_orders = self._client.get_open_algo_orders(symbol)
                 except Exception as exc:
                     logger.warning("[UDS] catch-up: open_orders %s failed: %s", symbol, exc)
                     continue
 
-                open_ids  = {str(o["orderId"]) for o in open_orders}
+                open_ids  = {str(o["algoId"]) for o in open_orders}
                 sl_exists = sl_id in open_ids
                 tp_exists = tp_id in open_ids
 
@@ -166,14 +169,11 @@ class UserDataStream:
                     if not order_id or order_id in open_ids:
                         continue
                     try:
-                        resp = self._client._request("GET", "/fapi/v1/order", {
-                            "symbol":  symbol,
-                            "orderId": order_id,
-                        })
-                        if resp.get("status") != "FILLED":
+                        resp = self._client.get_algo_order(symbol, order_id)
+                        if resp.get("algoStatus") != "FINISHED":
                             continue
-                        fill  = float(resp.get("avgPrice") or resp.get("stopPrice") or 0)
-                        qty   = float(resp.get("executedQty") or 0)
+                        fill  = float(resp.get("actualPrice") or resp.get("triggerPrice") or 0)
+                        qty   = float(resp.get("actualQty") or 0)
                         tid   = trade["id"]
                         partial_taken = int(trade.get("partial_taken") or 0)
 
@@ -192,9 +192,13 @@ class UserDataStream:
     # ── Event dispatch ────────────────────────────────────────────────────────
 
     def _on_message(self, msg: dict) -> None:
-        if msg.get("e") != "ORDER_TRADE_UPDATE":
-            return
+        event = msg.get("e")
+        if event == "ORDER_TRADE_UPDATE":
+            self._on_order_trade_update(msg)
+        elif event == "ALGO_UPDATE":
+            self._on_algo_update(msg)
 
+    def _on_order_trade_update(self, msg: dict) -> None:
         order   = msg.get("o", {})
         symbol  = order.get("s")
         status  = order.get("X")          # order status
@@ -212,6 +216,50 @@ class UserDataStream:
             symbol, order_id, order_type, fill_price, fill_qty,
         )
 
+        self._dispatch_fill(symbol, order_id, fill_price, fill_qty)
+
+    def _on_algo_update(self, msg: dict) -> None:
+        """
+        Handle bracket (SL/TP) order status changes. Algo/conditional order
+        fills are NOT reported via ORDER_TRADE_UPDATE — Binance pushes them
+        on this separate event since the Algo Order API migration.
+        """
+        algo   = msg.get("o", {})
+        symbol = algo.get("s")
+        algo_status = algo.get("X")
+        algo_id     = str(algo.get("aid", ""))
+
+        if algo_status in ("CANCELED", "EXPIRED"):
+            return
+
+        if algo_status == "REJECTED":
+            logger.warning(
+                "[UDS] ALGO_UPDATE %s  algoId=%s  REJECTED  reason=%s",
+                symbol, algo_id, algo.get("rm"),
+            )
+            return
+
+        if algo_status != "FINISHED":
+            return  # NEW / TRIGGERING / TRIGGERED — not filled yet
+
+        fill_price = float(algo.get("ap") or 0)
+        fill_qty   = float(algo.get("aq") or 0)
+        if not fill_price or not fill_qty:
+            logger.debug(
+                "[UDS] ALGO_UPDATE %s  algoId=%s  FINISHED with no fill — ignoring",
+                symbol, algo_id,
+            )
+            return
+
+        logger.info(
+            "[UDS] ALGO_UPDATE %s  algoId=%s  type=%s  fill=%.4f  qty=%.6f",
+            symbol, algo_id, algo.get("o", ""), fill_price, fill_qty,
+        )
+
+        self._dispatch_fill(symbol, algo_id, fill_price, fill_qty)
+
+    def _dispatch_fill(self, symbol: str, filled_id: str, fill_price: float, fill_qty: float) -> None:
+        """Route a filled order/algo id to the matching live_trades row's handler."""
         with self._lock:
             with get_conn() as conn:
                 rows = [
@@ -227,18 +275,18 @@ class UserDataStream:
                 partial_taken = int(trade.get("partial_taken") or 0)
                 tid           = trade["id"]
 
-                if order_id == tp_id and partial_taken == 0:
+                if filled_id == tp_id and partial_taken == 0:
                     logger.info("[UDS] Routing to handle_partial_tp id=%d", tid)
                     self._executor.handle_partial_tp(tid, fill_price, fill_qty)
 
-                elif order_id == sl_id and partial_taken == 0:
+                elif filled_id == sl_id and partial_taken == 0:
                     logger.info("[UDS] Routing to handle_sl_hit (full, before partial) id=%d", tid)
                     self._executor.handle_sl_hit(tid, fill_price)
 
-                elif order_id == sl_id and partial_taken == 1:
+                elif filled_id == sl_id and partial_taken == 1:
                     logger.info("[UDS] Routing to handle_sl_hit (remainder, after partial) id=%d", tid)
                     self._executor.handle_sl_hit(tid, fill_price)
 
-                elif order_id == tp_id and partial_taken == 1:
+                elif filled_id == tp_id and partial_taken == 1:
                     logger.info("[UDS] Routing to handle_tp_hit (final) id=%d", tid)
                     self._executor.handle_tp_hit(tid, fill_price)
