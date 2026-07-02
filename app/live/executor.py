@@ -117,6 +117,34 @@ class LiveExecutor:
 
         return True, ""
 
+    # ── Fill-price resolution ─────────────────────────────────────────────────
+
+    def _resolve_fill_price(self, symbol: str, order_resp: dict) -> float | None:
+        """
+        Return the average fill price of an order, polling the exchange if the
+        synchronous response didn't carry one (common on testnet, sometimes on
+        mainnet). Returns None if the price can't be determined.
+        """
+        price = float(order_resp.get("avgPrice") or 0) or None
+        if price is not None:
+            return price
+        order_id = order_resp.get("orderId")
+        if not order_id:
+            return None
+        for _ in range(5):
+            time.sleep(0.5)
+            try:
+                q = self._client._request("GET", "/fapi/v1/order", {
+                    "symbol": symbol, "orderId": order_id,
+                })
+            except Exception as exc:
+                logger.debug("[Executor] fill-price poll %s failed: %s", order_id, exc)
+                continue
+            price = float(q.get("avgPrice") or 0) or None
+            if price is not None:
+                return price
+        return None
+
     # ── Entry ─────────────────────────────────────────────────────────────────
 
     def open_trade(self, symbol: str, sig, signal_id: int | None) -> int | None:
@@ -187,7 +215,20 @@ class LiveExecutor:
                 logger.error("[Executor] %s market entry failed: %s", symbol, exc)
                 return None
 
-            actual_fill = float(entry_resp.get("avgPrice") or sig.entry_price)
+            # The synchronous order response often carries no avgPrice
+            # (common on testnet) — poll for the real fill instead of
+            # silently using the signal entry: if price has moved past the
+            # signal entry, brackets computed from it can sit on the wrong
+            # side of the market and Binance rejects them with -2021
+            # "Order would immediately trigger" → emergency close.
+            actual_fill = self._resolve_fill_price(symbol, entry_resp)
+            if actual_fill is None:
+                logger.warning(
+                    "[Executor] %s entry fill price unavailable after polling — "
+                    "falling back to signal entry %.6f for bracket calc",
+                    symbol, sig.entry_price,
+                )
+                actual_fill = sig.entry_price
             exchange_entry_id = str(entry_resp.get("orderId", ""))
 
             # 8. Recalculate bracket prices from actual fill
@@ -197,6 +238,12 @@ class LiveExecutor:
                 if sig.signal == "SELL"
                 else actual_fill + 1.5 * actual_risk
             )
+            # A fill far past the signal entry can push +1.5R beyond the
+            # final target — never let the partial TP overshoot the final TP
+            if sig.signal == "SELL":
+                partial_tp = max(partial_tp, sig.take_profit)
+            else:
+                partial_tp = min(partial_tp, sig.take_profit)
             partial_tp     = self._client.round_price(symbol, partial_tp)
             sl_price       = self._client.round_price(symbol, sig.stop_loss)
             final_tp_price = self._client.round_price(symbol, sig.take_profit)
@@ -328,21 +375,7 @@ class LiveExecutor:
             close_price = None
             try:
                 close_resp  = self._client.place_market_order(symbol, close_side, remaining)
-                close_price = float(close_resp.get("avgPrice") or 0) or None
-                if close_price is None:
-                    # Market order accepted but the response didn't carry a
-                    # synchronous fill price (common on testnet, sometimes
-                    # on mainnet) -- poll briefly for the real fill rather
-                    # than treating an accepted order as a failed close.
-                    close_order_id = close_resp.get("orderId")
-                    for _ in range(5):
-                        time.sleep(0.5)
-                        q = self._client._request("GET", "/fapi/v1/order", {
-                            "symbol": symbol, "orderId": close_order_id,
-                        })
-                        close_price = float(q.get("avgPrice") or 0) or None
-                        if close_price:
-                            break
+                close_price = self._resolve_fill_price(symbol, close_resp)
             except Exception as close_exc:
                 logger.critical(
                     "[Executor] %s emergency close of naked remainder FAILED: %s — "
