@@ -1,0 +1,37 @@
+[Unit]
+Description=LQ-MTF Live Execution Watcher (real Binance Futures orders)
+Documentation=https://github.com/lhaicloud/python-cli-trading-system
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/lqmtf
+
+Environment="PATH=/root/lqmtf/venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/root/lqmtf/.env
+
+ExecStart=/root/lqmtf/venv/bin/python main.py live \
+    --auto \
+    --rescan-every 144 \
+    --risk 1.0 \
+    --heartbeat 8 \
+    --live-execution \
+    --yes
+
+ExecStopPost=/root/lqmtf/venv/bin/python -m scripts.live_service_watchdog
+
+Restart=always
+RestartSec=60
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lqmtf-live
+
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

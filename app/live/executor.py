@@ -18,6 +18,11 @@ from typing import TYPE_CHECKING
 
 from app.config import get_settings
 from app.db.connection import get_conn
+from app.live.live_notifications import (
+    live_notify_error,
+    live_notify_partial_tp,
+    live_notify_trade_closed,
+)
 from app.ta.leverage import dynamic_leverage
 from app.utils.logger import get_logger
 from app.utils.timeframes import ms_to_dt
@@ -382,6 +387,11 @@ class LiveExecutor:
                     "position may still be open and UNPROTECTED, manual intervention required  id=%d",
                     symbol, close_exc, live_trade_id,
                 )
+                live_notify_error(
+                    f"{symbol} naked remainder — manual intervention required",
+                    f"Partial TP bracket replace failed and emergency close also failed: "
+                    f"{close_exc} — id={live_trade_id}, position may still be open and UNPROTECTED.",
+                )
 
             if close_price is not None:
                 if direction == "BUY":
@@ -444,6 +454,15 @@ class LiveExecutor:
                 ),
             )
             conn.commit()
+
+        live_notify_partial_tp(
+            {
+                "remaining_size": remaining,
+                "take_profit": final_tp,
+                "entry_price": entry_price,
+            },
+            symbol, fill_price, partial_pnl,
+        )
 
         logger.info(
             "[Executor] %s partial TP @ %.4f  qty=%.6f  pnl=%.2f  BE-SL=%s  finalTP=%s",
@@ -510,6 +529,18 @@ class LiveExecutor:
                 (status, close_price, close_time, total_pnl, pnl_pct, live_trade_id),
             )
             conn.commit()
+
+        live_notify_trade_closed(
+            {
+                "direction": direction,
+                "entry_price": entry_price,
+                "close_price": close_price,
+                "pnl": total_pnl,
+                "pnl_pct": pnl_pct,
+                "status": status,
+            },
+            symbol, leverage=leverage,
+        )
 
         result = "WIN" if total_pnl >= 0 else "LOSS"
         logger.info(
