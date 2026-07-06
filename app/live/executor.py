@@ -25,6 +25,7 @@ from app.live.live_notifications import (
 )
 from app.ta.leverage import dynamic_leverage
 from app.utils.logger import get_logger
+from app.utils.math_utils import position_size as position_size_fn
 from app.utils.timeframes import ms_to_dt
 
 if TYPE_CHECKING:
@@ -192,8 +193,9 @@ class LiveExecutor:
                 logger.warning("[Executor] %s SL distance is zero — skip", symbol)
                 return None
 
-            notional      = (risk_amount / sl_distance) * sig.entry_price * leverage
-            raw_qty       = notional / sig.entry_price
+            raw_qty       = position_size_fn(
+                balance, cfg.live_risk_pct, sig.entry_price, sig.stop_loss, leverage
+            )
             position_size = self._client.round_qty(symbol, raw_qty)
             if position_size <= 0:
                 logger.warning("[Executor] %s position size rounds to zero — skip", symbol)
