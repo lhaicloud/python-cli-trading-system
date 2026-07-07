@@ -203,16 +203,29 @@ class BinanceExchangeClient:
     def get_open_orders(self, symbol: str) -> list[dict]:
         return self._request("GET", "/fapi/v1/openOrders", {"symbol": symbol})
 
+    def get_mark_price(self, symbol: str) -> float:
+        """Return the current mark price (what MARK_PRICE brackets trigger on)."""
+        data = self._request("GET", "/fapi/v1/premiumIndex", {"symbol": symbol}, signed=False)
+        return float(data.get("markPrice") or 0)
+
     # ── Orders ────────────────────────────────────────────────────────────────
 
-    def place_market_order(self, symbol: str, side: str, quantity: float) -> dict:
-        """Place a market order. Returns the full order response including avgPrice."""
+    def place_market_order(
+        self, symbol: str, side: str, quantity: float, reduce_only: bool = False
+    ) -> dict:
+        """Place a market order. Returns the full order response including avgPrice.
+
+        reduce_only=True exempts the order from the min-notional filter, so
+        even dust-sized position remainders can be closed.
+        """
         params = {
             "symbol":   symbol,
             "side":     side,       # BUY or SELL
             "type":     "MARKET",
             "quantity": quantity,
         }
+        if reduce_only:
+            params["reduceOnly"] = "true"
         result = self._request("POST", "/fapi/v1/order", params)
         logger.info(
             "[Exchange] MARKET %s %s qty=%s  avgPrice=%s",
@@ -288,7 +301,9 @@ class BinanceExchangeClient:
                 "symbol": symbol,
                 "algoId": algo_id,
             })
-            logger.debug("[Exchange] Cancelled algo order %s for %s", algo_id, symbol)
+            # info, not debug: cancel success must be auditable in journald —
+            # a missed cancel here means a stale bracket resting on the exchange
+            logger.info("[Exchange] Cancelled algo order %s for %s", algo_id, symbol)
             return result
         except Exception as exc:
             logger.warning("[Exchange] Cancel algo order %s failed: %s", algo_id, exc)

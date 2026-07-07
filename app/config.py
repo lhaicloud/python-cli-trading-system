@@ -82,6 +82,11 @@ class Settings(BaseSettings):
     # dynamic_leverage() scales 1×–N× based on confidence, zone, R:R, regime.
     # 3+ consecutive losses always forces back to 1× regardless of this ceiling.
     live_max_leverage:       int   = Field(1,    env="LIVE_MAX_LEVERAGE")
+    # Minimum R:R measured from the CURRENT mark price at execution time.
+    # Signals are computed on candle close; by the time the executor runs,
+    # price may have drifted past the planned entry, silently inverting the
+    # trade's R:R. Entries below this floor are skipped.
+    live_min_rr:             float = Field(1.2,  env="LIVE_MIN_RR")
 
     # ── Live Telegram channel (separate from paper channel) ────────────────────
     live_telegram_token:   str = Field("", env="LIVE_TELEGRAM_TOKEN")

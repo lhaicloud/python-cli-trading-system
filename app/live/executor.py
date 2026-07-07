@@ -186,35 +186,74 @@ class LiveExecutor:
                 sig, recent_trades, max_leverage=cfg.live_max_leverage
             )
 
-            # 4. Position sizing
-            risk_amount   = balance * cfg.live_risk_pct / 100
-            sl_distance   = abs(sig.entry_price - sig.stop_loss)
+            # 4. Entry-price revalidation.
+            # The signal's entry_price comes from candle-close analysis and can
+            # be far from where a market order will actually fill. Measure risk
+            # and reward from the current mark price: if drift has crushed the
+            # R:R below the floor, skip rather than take a misshapen trade.
+            try:
+                exec_price = self._client.get_mark_price(symbol)
+            except Exception as exc:
+                logger.error("[Executor] %s mark price fetch failed: %s — skip", symbol, exc)
+                return None
+            if exec_price <= 0:
+                logger.warning("[Executor] %s mark price unavailable — skip", symbol)
+                return None
+
+            sl_distance = abs(exec_price - sig.stop_loss)
             if sl_distance == 0:
                 logger.warning("[Executor] %s SL distance is zero — skip", symbol)
                 return None
+            wrong_side = (
+                exec_price <= sig.stop_loss if sig.signal == "BUY"
+                else exec_price >= sig.stop_loss
+            )
+            if wrong_side:
+                logger.warning(
+                    "[Executor] %s SKIPPED — mark price %.6f already beyond stop %.6f",
+                    symbol, exec_price, sig.stop_loss,
+                )
+                return None
+            reward = (
+                sig.take_profit - exec_price if sig.signal == "BUY"
+                else exec_price - sig.take_profit
+            )
+            live_rr = reward / sl_distance
+            if live_rr < cfg.live_min_rr:
+                logger.warning(
+                    "[Executor] %s SKIPPED — R:R at mark price %.6f is %.2f "
+                    "(signal entry %.6f promised %.2f, floor %.2f)",
+                    symbol, exec_price, live_rr,
+                    sig.entry_price, sig.risk_reward or 0, cfg.live_min_rr,
+                )
+                return None
 
+            # 5. Position sizing — from the executable price, not the signal
+            # entry, so capital at risk stays at live_risk_pct of balance even
+            # when price has drifted.
+            risk_amount   = balance * cfg.live_risk_pct / 100
             raw_qty       = position_size_fn(
-                balance, cfg.live_risk_pct, sig.entry_price, sig.stop_loss, leverage
+                balance, cfg.live_risk_pct, exec_price, sig.stop_loss, leverage
             )
             position_size = self._client.round_qty(symbol, raw_qty)
             if position_size <= 0:
                 logger.warning("[Executor] %s position size rounds to zero — skip", symbol)
                 return None
 
-            # 5. Preflight exchange checks
+            # 6. Preflight exchange checks
             ok, reason = self._preflight(symbol, sig.signal)
             if not ok:
                 logger.warning("[Executor] %s preflight failed — %s", symbol, reason)
                 return None
 
-            # 6. Set leverage on exchange
+            # 7. Set leverage on exchange
             try:
                 self._client.set_leverage(symbol, leverage)
             except Exception as exc:
                 logger.error("[Executor] %s set_leverage failed: %s", symbol, exc)
                 return None
 
-            # 7. Market entry order
+            # 8. Market entry order
             entry_side = "BUY" if sig.signal == "BUY" else "SELL"
             try:
                 entry_resp  = self._client.place_market_order(symbol, entry_side, position_size)
@@ -238,38 +277,52 @@ class LiveExecutor:
                 actual_fill = sig.entry_price
             exchange_entry_id = str(entry_resp.get("orderId", ""))
 
-            # 8. Recalculate bracket prices from actual fill
+            # 9. Recalculate bracket prices from actual fill
             actual_risk    = abs(actual_fill - sig.stop_loss)
             partial_tp     = (
                 actual_fill - 1.5 * actual_risk
                 if sig.signal == "SELL"
                 else actual_fill + 1.5 * actual_risk
             )
-            # A fill far past the signal entry can push +1.5R beyond the
-            # final target — never let the partial TP overshoot the final TP
-            if sig.signal == "SELL":
-                partial_tp = max(partial_tp, sig.take_profit)
-            else:
-                partial_tp = min(partial_tp, sig.take_profit)
             partial_tp     = self._client.round_price(symbol, partial_tp)
             sl_price       = self._client.round_price(symbol, sig.stop_loss)
             final_tp_price = self._client.round_price(symbol, sig.take_profit)
 
+            # If +1.5R already reaches the final target there is no room for a
+            # two-stage exit: a partial TP clamped to the final TP means the
+            # replacement TP after the partial fill lands at the same price and
+            # Binance rejects it with -2021 "would immediately trigger". Take
+            # the whole position off at the final TP in one order instead.
+            single_stage = (
+                partial_tp <= final_tp_price if sig.signal == "SELL"
+                else partial_tp >= final_tp_price
+            )
+
             half_size      = self._client.round_qty(symbol, position_size / 2)
-            remaining_size = self._client.round_qty(symbol, position_size - half_size)
+            # Round the raw difference before lot-snapping: float dust
+            # (37.33 - 18.66 = 18.669999…) otherwise gets floored one whole
+            # lot-step short, leaving a residual position behind the brackets.
+            remaining_size = self._client.round_qty(
+                symbol, round(position_size - half_size, 8)
+            )
 
             # Bracket sides are always the opposite of the entry
             bracket_side = "SELL" if sig.signal == "BUY" else "BUY"
 
-            # 9. Place bracket orders
+            # 10. Place bracket orders
             sl_order = tp_order = None
             try:
                 sl_order = self._client.place_stop_market(
                     symbol, bracket_side, sl_price, position_size
                 )
-                tp_order = self._client.place_take_profit_market(
-                    symbol, bracket_side, partial_tp, half_size
-                )
+                if single_stage:
+                    tp_order = self._client.place_take_profit_market(
+                        symbol, bracket_side, final_tp_price, position_size
+                    )
+                else:
+                    tp_order = self._client.place_take_profit_market(
+                        symbol, bracket_side, partial_tp, half_size
+                    )
             except Exception as exc:
                 logger.error("[Executor] %s bracket placement failed: %s — emergency close", symbol, exc)
                 # Cancel whatever was placed
@@ -278,12 +331,17 @@ class LiveExecutor:
                 # Close position immediately
                 close_side = "SELL" if sig.signal == "BUY" else "BUY"
                 try:
-                    self._client.place_market_order(symbol, close_side, position_size)
+                    self._client.place_market_order(
+                        symbol, close_side, position_size, reduce_only=True
+                    )
                 except Exception as close_exc:
                     logger.error("[Executor] %s emergency close failed: %s", symbol, close_exc)
                 return None
 
-            # 10. Insert live_trades row
+            # 11. Insert live_trades row
+            # Single-stage exits are stored with partial_taken=1 and the full
+            # size as remaining: a fill of the TP algo then routes straight to
+            # handle_tp_hit and the whole position closes as target_hit.
             capital_at_risk = risk_amount
             rr = sig.risk_reward or 0
             open_time = _now_ms()
@@ -295,16 +353,20 @@ class LiveExecutor:
                         symbol, signal_id, direction, status,
                         entry_price, stop_loss, take_profit, partial_tp_price,
                         position_size, remaining_size, capital_at_risk,
-                        risk_reward, leverage, open_time,
+                        risk_reward, leverage, open_time, partial_taken,
                         exchange_entry_id, exchange_sl_id, exchange_tp_id,
                         original_risk, model_version
-                    ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         symbol, signal_id, sig.signal,
-                        actual_fill, sl_price, final_tp_price, partial_tp,
-                        position_size, remaining_size, capital_at_risk,
+                        actual_fill, sl_price, final_tp_price,
+                        final_tp_price if single_stage else partial_tp,
+                        position_size,
+                        position_size if single_stage else remaining_size,
+                        capital_at_risk,
                         rr, leverage, open_time,
+                        1 if single_stage else 0,
                         exchange_entry_id,
                         str(sl_order.get("algoId", "")),
                         str(tp_order.get("algoId", "")),
@@ -316,9 +378,11 @@ class LiveExecutor:
                 conn.commit()
 
             logger.info(
-                "[Executor] %s %s opened  fill=%.4f  sl=%.4f  partial_tp=%.4f  "
+                "[Executor] %s %s opened  fill=%.4f  sl=%.4f  %s=%.4f  "
                 "size=%.6f  lev=%d×  id=%d",
-                symbol, sig.signal, actual_fill, sl_price, partial_tp,
+                symbol, sig.signal, actual_fill, sl_price,
+                "single_tp" if single_stage else "partial_tp",
+                final_tp_price if single_stage else partial_tp,
                 position_size, leverage, live_trade_id,
             )
             return live_trade_id
@@ -349,6 +413,21 @@ class LiveExecutor:
         old_sl_id   = trade["exchange_sl_id"]
         old_tp_id   = trade["exchange_tp_id"]
 
+        # The exchange position is the source of truth for what is actually
+        # left after the partial fill — the DB's remaining_size can sit a
+        # lot-step away from it and leave dust behind the new bracket.
+        try:
+            pos = self._client.get_position(symbol)
+            if pos is not None:
+                exchange_amt = abs(float(pos.get("positionAmt", 0)))
+                if exchange_amt > 0:
+                    remaining = exchange_amt
+        except Exception as exc:
+            logger.warning(
+                "[Executor] %s position query after partial TP failed: %s — "
+                "using DB remaining_size %.6f", symbol, exc, remaining,
+            )
+
         # Partial PnL
         if direction == "BUY":
             partial_pnl = (fill_price - entry_price) * filled_qty
@@ -369,7 +448,20 @@ class LiveExecutor:
             new_sl = self._client.place_stop_market(symbol, bracket_side, be_price, remaining)
             new_tp = self._client.place_take_profit_market(symbol, bracket_side, final_tp_r, remaining)
         except Exception as exc:
-            logger.error("[Executor] %s bracket replace after partial TP failed: %s", symbol, exc)
+            # -2021 "Order would immediately trigger" is not an execution
+            # fault: price has already moved through the trigger, so the
+            # remainder just needs to come off at market. If the final TP was
+            # the order that bounced (BE-SL went in fine), the target was
+            # effectively reached.
+            body = getattr(getattr(exc, "response", None), "text", "") or ""
+            target_reached = "-2021" in body and new_sl is not None
+            if target_reached:
+                logger.info(
+                    "[Executor] %s final TP already beyond price after partial — "
+                    "closing remainder at market", symbol,
+                )
+            else:
+                logger.error("[Executor] %s bracket replace after partial TP failed: %s", symbol, exc)
             if new_sl:
                 self._client.cancel_algo_order(symbol, new_sl.get("algoId", ""))
 
@@ -381,7 +473,9 @@ class LiveExecutor:
             close_side  = "SELL" if direction == "BUY" else "BUY"
             close_price = None
             try:
-                close_resp  = self._client.place_market_order(symbol, close_side, remaining)
+                close_resp  = self._client.place_market_order(
+                    symbol, close_side, remaining, reduce_only=True
+                )
                 close_price = self._resolve_fill_price(symbol, close_resp)
             except Exception as close_exc:
                 logger.critical(
@@ -400,9 +494,14 @@ class LiveExecutor:
                     remain_pnl = (close_price - entry_price) * remaining
                 else:
                     remain_pnl = (entry_price - close_price) * remaining
-                total_pnl = partial_pnl + remain_pnl
+                total_pnl    = partial_pnl + remain_pnl
+                close_status = "target_hit" if target_reached else "closed"
             else:
-                total_pnl = None
+                total_pnl    = None
+                close_status = "open"
+
+            risk    = float(trade.get("capital_at_risk") or 0)
+            pnl_pct = (total_pnl / risk * 100) if (total_pnl is not None and risk) else 0.0
 
             with get_conn() as conn:
                 conn.execute(
@@ -414,6 +513,7 @@ class LiveExecutor:
                         close_price    = ?,
                         close_time     = ?,
                         pnl            = ?,
+                        pnl_pct        = ?,
                         exchange_sl_id = '',
                         exchange_tp_id = '',
                         updated_at     = CURRENT_TIMESTAMP
@@ -421,19 +521,35 @@ class LiveExecutor:
                     """,
                     (
                         partial_pnl,
-                        "closed" if close_price is not None else "open",
+                        close_status,
                         close_price,
                         _now_ms() if close_price is not None else None,
                         total_pnl,
+                        pnl_pct,
                         live_trade_id,
                     ),
                 )
                 conn.commit()
 
-            logger.warning(
-                "[Executor] %s partial TP filled but bracket replace failed — "
-                "remainder emergency-closed  pnl=%s  id=%d",
-                symbol, f"{total_pnl:.2f}" if total_pnl is not None else "UNKNOWN", live_trade_id,
+            if close_price is not None:
+                live_notify_trade_closed(
+                    {
+                        "direction": direction,
+                        "entry_price": entry_price,
+                        "close_price": close_price,
+                        "pnl": total_pnl,
+                        "pnl_pct": pnl_pct,
+                        "status": close_status,
+                    },
+                    symbol, leverage=int(trade.get("leverage") or 1),
+                )
+
+            log = logger.info if target_reached else logger.warning
+            log(
+                "[Executor] %s partial TP filled, remainder market-closed [%s]  "
+                "pnl=%s  id=%d",
+                symbol, close_status,
+                f"{total_pnl:.2f}" if total_pnl is not None else "UNKNOWN", live_trade_id,
             )
             return
 
@@ -650,7 +766,7 @@ class LiveExecutor:
                 qty = self._client.round_qty(symbol, qty)
                 if qty > 0:
                     try:
-                        self._client.place_market_order(symbol, close_side, qty)
+                        self._client.place_market_order(symbol, close_side, qty, reduce_only=True)
                     except Exception as exc:
                         logger.error("[Executor] emergency market close %s failed: %s", symbol, exc)
 
