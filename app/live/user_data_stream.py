@@ -112,7 +112,7 @@ class UserDataStream:
             on_error=on_error,
             on_close=on_close,
         )
-        ws.run_forever(ping_interval=0)
+        ws.run_forever(ping_interval=10, ping_timeout=5)
 
         if not self._stop_flag.is_set():
             raise ConnectionError("WebSocket disconnected")
