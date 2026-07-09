@@ -20,7 +20,7 @@ import pandas as pd
 
 from app.version import ENGINE_VERSION
 
-from app.config import get_settings
+from app.config import get_settings, get_settings_for_symbol
 from app.models.versioning import get_current_model_path
 from app.ta.indicators import add_indicators
 from app.ta.liquidity import detect_liquidity_levels, detect_sweeps, liquidity_was_swept_below, liquidity_was_swept_above
@@ -100,7 +100,7 @@ def generate_signal(
     Inputs: OHLCV DataFrames for each timeframe (index = DatetimeIndex UTC).
     Returns: SignalResult with full confluence breakdown.
     """
-    cfg = get_settings()
+    cfg = get_settings_for_symbol(symbol)
     reasons:  list[str] = []
     warnings: list[str] = []
 

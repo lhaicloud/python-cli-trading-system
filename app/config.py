@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -48,6 +48,18 @@ class Settings(BaseSettings):
     min_zone_score: float = 70.0
     min_zone_score_no_model: float = 70.0
     min_signal_confidence: float = 65.0
+
+    # Symbols pinned to the baseline (pre-relaxation) gating thresholds
+    # regardless of MTF_MIN_SCORE/MIN_ZONE_SCORE/MIN_SIGNAL_CONFIDENCE tuning.
+    # Comma-separated in .env, e.g. STRICT_SYMBOLS=DOGEUSDT,HYPEUSDT
+    strict_symbols: list[str] = Field(default_factory=list, env="STRICT_SYMBOLS")
+
+    @field_validator("strict_symbols", mode="before")
+    @classmethod
+    def _split_strict_symbols(cls, v):
+        if isinstance(v, str):
+            return [s.strip().upper() for s in v.split(",") if s.strip()]
+        return v
 
     # Backtest — futures fees (taker 0.05% vs spot 0.10%)
     backtest_fee_pct: float = 0.05
@@ -208,3 +220,26 @@ def get_settings() -> Settings:
         _settings = Settings()
         _settings.ensure_dirs()
     return _settings
+
+
+# Baseline (pre-relaxation) gating thresholds -- always used for STRICT_SYMBOLS
+# regardless of what MTF_MIN_SCORE/MIN_ZONE_SCORE/etc. are currently tuned to.
+_STRICT_THRESHOLDS = dict(
+    mtf_min_score=55.0,
+    mtf_min_score_gap=15.0,
+    min_zone_score=70.0,
+    min_zone_score_no_model=70.0,
+    min_signal_confidence=65.0,
+)
+
+
+def get_settings_for_symbol(symbol: str) -> Settings:
+    """
+    Same as get_settings(), but pins gating thresholds to the strict baseline
+    for any symbol listed in STRICT_SYMBOLS -- lets the rest of the universe
+    run relaxed thresholds while excluding specific underperforming symbols.
+    """
+    cfg = get_settings()
+    if symbol.upper() in cfg.strict_symbols:
+        return cfg.model_copy(update=_STRICT_THRESHOLDS)
+    return cfg

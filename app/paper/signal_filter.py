@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from app.config import get_settings
+from app.config import get_settings, get_settings_for_symbol
 from app.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -112,7 +112,7 @@ class SignalFilter:
 
     def _zone_score(self, sig: "SignalResult") -> tuple[bool, str]:
         """Reject if zone score is below the configured minimum."""
-        cfg = get_settings()
+        cfg = get_settings_for_symbol(sig.symbol)
         if sig.zone_score < cfg.min_zone_score:
             return False, (
                 f"Zone score {sig.zone_score:.1f} < min {cfg.min_zone_score:.1f}"
@@ -134,7 +134,7 @@ class SignalFilter:
 
     def _confidence(self, sig: "SignalResult") -> tuple[bool, str]:
         """Reject if ML/rule confidence is below the configured minimum."""
-        cfg = get_settings()
+        cfg = get_settings_for_symbol(sig.symbol)
         if sig.confidence < cfg.min_signal_confidence:
             return False, (
                 f"Confidence {sig.confidence:.1f} < min {cfg.min_signal_confidence:.1f}"
