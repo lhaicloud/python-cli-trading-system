@@ -588,6 +588,52 @@ class LiveExecutor:
                         entry["symbol"], entry["id"],
                     )
 
+    def update_excursion(self, symbol: str, candle_high: float, candle_low: float) -> None:
+        """
+        Update the running max favorable/adverse excursion for an open live
+        trade from the latest 30m candle's high/low. Called once per symbol
+        per cycle from the main thread (live_watcher already fetches this
+        candle for signal generation — no extra API calls). Mirrors the
+        formula PositionManager.check_price() uses for paper
+        (app/paper/position_manager.py:699-709), but samples candle high/low
+        instead of tick close — live has no continuous tick stream, so this
+        is the closest equivalent and is actually a tighter bound on true
+        intra-candle excursion than paper's tick-sampled version.
+        """
+        with self._lock:
+            with get_conn() as conn:
+                row = conn.execute(
+                    "SELECT id, direction, entry_price, max_favorable_excursion, "
+                    "max_adverse_excursion FROM live_trades WHERE symbol=? AND status='open'",
+                    (symbol,),
+                ).fetchone()
+            if not row:
+                return
+            trade_id, direction, entry, stored_mfe, stored_mae = row
+            entry      = float(entry)
+            stored_mfe = float(stored_mfe or 0)
+            stored_mae = float(stored_mae or 0)
+
+            if direction == "BUY":
+                curr_mfe = max(0.0, candle_high - entry)
+                curr_mae = max(0.0, entry - candle_low)
+            else:
+                curr_mfe = max(0.0, entry - candle_low)
+                curr_mae = max(0.0, candle_high - entry)
+
+            new_mfe = max(stored_mfe, curr_mfe)
+            new_mae = max(stored_mae, curr_mae)
+            if new_mfe == stored_mfe and new_mae == stored_mae:
+                return
+
+            with get_conn() as conn:
+                conn.execute(
+                    "UPDATE live_trades SET max_favorable_excursion=?, "
+                    "max_adverse_excursion=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (round(new_mfe, 6), round(new_mae, 6), trade_id),
+                )
+                conn.commit()
+
     def handle_partial_tp(
         self,
         live_trade_id: int,

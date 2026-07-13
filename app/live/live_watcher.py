@@ -431,6 +431,13 @@ class LiveTradingWatcher:
             f"[dim]H={candle_high:,.4f}  L={candle_low:,.4f}[/dim]"
         )
 
+        # Track running MFE/MAE for any open live trade on this symbol —
+        # zero extra API calls, this candle is already fetched above.
+        try:
+            self._executor.update_excursion(symbol, candle_high, candle_low)
+        except Exception as exc:
+            logger.warning("[LiveWatcher][%s] update_excursion failed: %s", symbol, exc)
+
         # 3. Generate signal — use live balance as capital basis
         try:
             capital = self._client.get_balance()
