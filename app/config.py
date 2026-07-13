@@ -162,6 +162,10 @@ class Settings(BaseSettings):
     entry_limit_expiry_candles: int   = Field(4,    env="ENTRY_LIMIT_EXPIRY_CANDLES")  # × 30m = 2h
     # If |entry - current| is below this %, fill at market immediately.
     entry_limit_min_gap_pct:    float = Field(0.05, env="ENTRY_LIMIT_MIN_GAP_PCT")
+    # Independent live-only switch (real resting order on the exchange, not the
+    # simulated paper one above). Off by default — untested against real fills;
+    # reuses entry_limit_expiry_candles / entry_limit_min_gap_pct for its knobs.
+    live_entry_limit_enabled:   bool  = Field(False, env="LIVE_ENTRY_LIMIT_ENABLED")
 
     # ── Funding-rate filter (futures sentiment) ───────────────────────────────
     # Block SELLs when funding is already strongly negative (crowded short,

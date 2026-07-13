@@ -233,6 +233,28 @@ class BinanceExchangeClient:
         )
         return result
 
+    def place_limit_order(
+        self, symbol: str, side: str, quantity: float, price: float,
+        reduce_only: bool = False,
+    ) -> dict:
+        """Place a GTC limit order. Returns the order response (includes orderId)."""
+        params = {
+            "symbol":      symbol,
+            "side":        side,       # BUY or SELL
+            "type":        "LIMIT",
+            "timeInForce": "GTC",
+            "quantity":    quantity,
+            "price":       self.round_price(symbol, price),
+        }
+        if reduce_only:
+            params["reduceOnly"] = "true"
+        result = self._request("POST", "/fapi/v1/order", params)
+        logger.info(
+            "[Exchange] LIMIT %s %s qty=%s price=%s orderId=%s",
+            side, symbol, quantity, price, result.get("orderId"),
+        )
+        return result
+
     def place_stop_market(
         self,
         symbol: str,

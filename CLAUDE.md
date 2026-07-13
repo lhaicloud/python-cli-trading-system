@@ -73,6 +73,18 @@ To disable ML model during signal generation: `DISABLE_ML_MODEL=1 python main.py
   fills via `PositionManager.check_pending()`; expires after
   `ENTRY_LIMIT_EXPIRY_CANDLES` × 30m. Kept off by default — BTC Q1-2025 backtest
   showed it skips the best trades (winners enter and never retrace).
+  Live execution has an **independent** flag, `LIVE_ENTRY_LIMIT_ENABLED` (also
+  default off, untested against real fills), reusing the same
+  `ENTRY_LIMIT_EXPIRY_CANDLES` / `ENTRY_LIMIT_MIN_GAP_PCT` knobs — it places a
+  real resting `LIMIT` order on Binance (`LiveExecutor.open_trade()` →
+  `place_limit_order`) rather than a simulated one, tracked in
+  `live_pending_entries` and finalized asynchronously via
+  `handle_entry_limit_fill()` when `UserDataStream` reports the fill. Because a
+  real fill can't be undone the way a simulated one can, guards are re-checked
+  at fill time; if they now fail, the position is immediately market-flattened
+  instead of finalized. Meant to test whether resting live entries reduce the
+  real-time-drift rejections seen in `open_trade`'s market-price R:R re-check —
+  a different failure mode than the backtest finding above.
 - **Partial TP**: 50% closed at +1.5R (`PARTIAL_TP_*`); final `pnl` column folds
   partial + remainder; capital is updated incrementally (use `pnl_increment`
   from `PositionManager.close()`, never `pnl`, for capital updates).

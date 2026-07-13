@@ -65,6 +65,32 @@ def run_migrations() -> None:
                 created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Real resting limit orders on the exchange (live entry refinement).
+        # Separate from pending_orders (paper's simulated version) because a
+        # live fill is irreversible and needs the exchange order id plus the
+        # already-sized qty/leverage/risk to finalize without re-deriving them.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS live_pending_entries (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol            TEXT    NOT NULL,
+                signal_id         INTEGER,
+                direction         TEXT    NOT NULL,
+                limit_price       REAL    NOT NULL,
+                stop_loss         REAL    NOT NULL,
+                take_profit       REAL    NOT NULL,
+                position_size     REAL    NOT NULL,
+                leverage          INTEGER NOT NULL,
+                capital_at_risk   REAL    NOT NULL,
+                risk_reward       REAL,
+                model_version     TEXT,
+                exchange_order_id TEXT    NOT NULL,
+                created_ms        INTEGER NOT NULL,
+                expiry_ms         INTEGER NOT NULL,
+                status            TEXT    DEFAULT 'pending',  -- pending|filled|expired|cancelled|flattened
+                filled_trade_id   INTEGER,
+                created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         # ── Live trades table ─────────────────────────────────────────────────
         conn.execute("""
             CREATE TABLE IF NOT EXISTS live_trades (

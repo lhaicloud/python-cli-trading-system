@@ -17,11 +17,17 @@ import time
 from typing import TYPE_CHECKING
 
 from app.config import get_settings
+from app.data.repository import (
+    create_live_pending_entry,
+    get_live_pending_entries,
+    update_live_pending_entry_status,
+)
 from app.db.connection import get_conn
 from app.live.live_notifications import (
     live_notify_error,
     live_notify_partial_tp,
     live_notify_trade_closed,
+    live_notify_trade_opened,
 )
 from app.ta.leverage import dynamic_leverage
 from app.utils.logger import get_logger
@@ -107,6 +113,10 @@ class LiveExecutor:
             if existing:
                 return False, f"already have open live trade for {symbol}"
 
+        # A resting limit entry also reserves the per-symbol slot
+        if get_live_pending_entries(symbol):
+            return False, f"pending limit entry already placed for {symbol}"
+
         return True, ""
 
     def _preflight(self, symbol: str, direction: str) -> tuple[bool, str]:
@@ -153,11 +163,16 @@ class LiveExecutor:
 
     # ── Entry ─────────────────────────────────────────────────────────────────
 
-    def open_trade(self, symbol: str, sig, signal_id: int | None) -> int | None:
+    def open_trade(self, symbol: str, sig, signal_id: int | None) -> tuple[str, int | None]:
         """
-        Place a full bracket order on Binance and insert a live_trades row.
+        Place a bracket order on Binance (market, or a resting limit if
+        LIVE_ENTRY_LIMIT_ENABLED and price needs to retrace) and insert a
+        live_trades row once filled.
 
-        Returns the new live_trade id, or None if entry was blocked/failed.
+        Returns (outcome, id):
+          "opened"  — market entry filled immediately, id = live_trade_id
+          "pending" — resting limit placed, id = live_pending_entries id
+          "blocked" — guards rejected or entry failed, id = None
         Acquires the shared lock for the entire operation.
         """
         cfg = self._cfg
@@ -166,13 +181,13 @@ class LiveExecutor:
             ok, reason = self._check_guards(symbol, sig.signal)
             if not ok:
                 logger.info("[Executor] %s BLOCKED — %s", symbol, reason)
-                return None
+                return "blocked", None
 
             # 2. Live balance → risk amount
             balance = self._client.get_balance()
             if balance <= 0:
                 logger.warning("[Executor] %s skipped — zero USDT balance", symbol)
-                return None
+                return "blocked", None
 
             # 3. Leverage
             with get_conn() as conn:
@@ -186,80 +201,129 @@ class LiveExecutor:
                 sig, recent_trades, max_leverage=cfg.live_max_leverage
             )
 
-            # 4. Entry-price revalidation.
-            # The signal's entry_price comes from candle-close analysis and can
-            # be far from where a market order will actually fill. Measure risk
-            # and reward from the current mark price: if drift has crushed the
-            # R:R below the floor, skip rather than take a misshapen trade.
+            # 4. Current mark price — needed both to decide market-vs-limit and,
+            # on the market path, to re-validate R:R against drift.
             try:
                 exec_price = self._client.get_mark_price(symbol)
             except Exception as exc:
                 logger.error("[Executor] %s mark price fetch failed: %s — skip", symbol, exc)
-                return None
+                return "blocked", None
             if exec_price <= 0:
                 logger.warning("[Executor] %s mark price unavailable — skip", symbol)
-                return None
+                return "blocked", None
 
-            sl_distance = abs(exec_price - sig.stop_loss)
-            if sl_distance == 0:
-                logger.warning("[Executor] %s SL distance is zero — skip", symbol)
-                return None
-            wrong_side = (
-                exec_price <= sig.stop_loss if sig.signal == "BUY"
-                else exec_price >= sig.stop_loss
+            gap = cfg.entry_limit_min_gap_pct / 100
+            needs_retrace = (
+                sig.entry_price < exec_price * (1 - gap) if sig.signal == "BUY"
+                else sig.entry_price > exec_price * (1 + gap)
             )
-            if wrong_side:
-                logger.warning(
-                    "[Executor] %s SKIPPED — mark price %.6f already beyond stop %.6f",
-                    symbol, exec_price, sig.stop_loss,
-                )
-                return None
-            reward = (
-                sig.take_profit - exec_price if sig.signal == "BUY"
-                else exec_price - sig.take_profit
-            )
-            live_rr = reward / sl_distance
-            if live_rr < cfg.live_min_rr:
-                logger.warning(
-                    "[Executor] %s SKIPPED — R:R at mark price %.6f is %.2f "
-                    "(signal entry %.6f promised %.2f, floor %.2f)",
-                    symbol, exec_price, live_rr,
-                    sig.entry_price, sig.risk_reward or 0, cfg.live_min_rr,
-                )
-                return None
+            use_limit_entry = cfg.live_entry_limit_enabled and needs_retrace
 
-            # 5. Position sizing — from the executable price, not the signal
-            # entry, so capital at risk stays at live_risk_pct of balance even
-            # when price has drifted.
+            if not use_limit_entry:
+                # Entry-price revalidation. The signal's entry_price comes from
+                # candle-close analysis and can be far from where a market order
+                # will actually fill. Measure risk and reward from the current
+                # mark price: if drift has crushed the R:R below the floor, skip
+                # rather than take a misshapen trade.
+                sl_distance = abs(exec_price - sig.stop_loss)
+                if sl_distance == 0:
+                    logger.warning("[Executor] %s SL distance is zero — skip", symbol)
+                    return "blocked", None
+                wrong_side = (
+                    exec_price <= sig.stop_loss if sig.signal == "BUY"
+                    else exec_price >= sig.stop_loss
+                )
+                if wrong_side:
+                    logger.warning(
+                        "[Executor] %s SKIPPED — mark price %.6f already beyond stop %.6f",
+                        symbol, exec_price, sig.stop_loss,
+                    )
+                    return "blocked", None
+                reward = (
+                    sig.take_profit - exec_price if sig.signal == "BUY"
+                    else exec_price - sig.take_profit
+                )
+                live_rr = reward / sl_distance
+                if live_rr < cfg.live_min_rr:
+                    logger.warning(
+                        "[Executor] %s SKIPPED — R:R at mark price %.6f is %.2f "
+                        "(signal entry %.6f promised %.2f, floor %.2f)",
+                        symbol, exec_price, live_rr,
+                        sig.entry_price, sig.risk_reward or 0, cfg.live_min_rr,
+                    )
+                    return "blocked", None
+
+            # 5. Position sizing. Market path sizes from the executable (mark)
+            # price so capital at risk stays at live_risk_pct of balance even
+            # when price has drifted. Limit path sizes from the resting limit
+            # price itself — that's the price the position will actually be
+            # risked at once filled.
+            sizing_price  = sig.entry_price if use_limit_entry else exec_price
             risk_amount   = balance * cfg.live_risk_pct / 100
             raw_qty       = position_size_fn(
-                balance, cfg.live_risk_pct, exec_price, sig.stop_loss, leverage
+                balance, cfg.live_risk_pct, sizing_price, sig.stop_loss, leverage
             )
             position_size = self._client.round_qty(symbol, raw_qty)
             if position_size <= 0:
                 logger.warning("[Executor] %s position size rounds to zero — skip", symbol)
-                return None
+                return "blocked", None
 
             # 6. Preflight exchange checks
             ok, reason = self._preflight(symbol, sig.signal)
             if not ok:
                 logger.warning("[Executor] %s preflight failed — %s", symbol, reason)
-                return None
+                return "blocked", None
 
             # 7. Set leverage on exchange
             try:
                 self._client.set_leverage(symbol, leverage)
             except Exception as exc:
                 logger.error("[Executor] %s set_leverage failed: %s", symbol, exc)
-                return None
+                return "blocked", None
+
+            entry_side = "BUY" if sig.signal == "BUY" else "SELL"
+
+            if use_limit_entry:
+                limit_price = self._client.round_price(symbol, sig.entry_price)
+                try:
+                    entry_resp = self._client.place_limit_order(
+                        symbol, entry_side, position_size, limit_price
+                    )
+                except Exception as exc:
+                    logger.error("[Executor] %s limit entry failed: %s", symbol, exc)
+                    return "blocked", None
+
+                now_ms = _now_ms()
+                pending_id = create_live_pending_entry({
+                    "symbol":            symbol,
+                    "signal_id":         signal_id,
+                    "direction":         sig.signal,
+                    "limit_price":       limit_price,
+                    "stop_loss":         round(sig.stop_loss, 6),
+                    "take_profit":       round(sig.take_profit, 6),
+                    "position_size":     position_size,
+                    "leverage":          leverage,
+                    "capital_at_risk":   risk_amount,
+                    "risk_reward":       round(sig.risk_reward or 0, 2),
+                    "model_version":     getattr(sig, "model_version", None),
+                    "exchange_order_id": str(entry_resp.get("orderId", "")),
+                    "created_ms":        now_ms,
+                    "expiry_ms":         now_ms + cfg.entry_limit_expiry_candles * 30 * 60 * 1000,
+                })
+                logger.info(
+                    "[Executor] %s Pending %s limit @ %.6f (mark %.6f), "
+                    "expires in %d candles  id=%d",
+                    symbol, sig.signal, limit_price, exec_price,
+                    cfg.entry_limit_expiry_candles, pending_id,
+                )
+                return "pending", pending_id
 
             # 8. Market entry order
-            entry_side = "BUY" if sig.signal == "BUY" else "SELL"
             try:
                 entry_resp  = self._client.place_market_order(symbol, entry_side, position_size)
             except Exception as exc:
                 logger.error("[Executor] %s market entry failed: %s", symbol, exc)
-                return None
+                return "blocked", None
 
             # The synchronous order response often carries no avgPrice
             # (common on testnet) — poll for the real fill instead of
@@ -277,117 +341,252 @@ class LiveExecutor:
                 actual_fill = sig.entry_price
             exchange_entry_id = str(entry_resp.get("orderId", ""))
 
-            # 9. Recalculate bracket prices from actual fill
-            actual_risk    = abs(actual_fill - sig.stop_loss)
-            partial_tp     = (
-                actual_fill - 1.5 * actual_risk
-                if sig.signal == "SELL"
-                else actual_fill + 1.5 * actual_risk
+            live_trade_id = self._finalize_entry(
+                symbol=symbol,
+                direction=sig.signal,
+                actual_fill=actual_fill,
+                stop_loss=sig.stop_loss,
+                take_profit=sig.take_profit,
+                position_size=position_size,
+                leverage=leverage,
+                capital_at_risk=risk_amount,
+                rr=sig.risk_reward or 0,
+                signal_id=signal_id,
+                model_version=getattr(sig, "model_version", None),
+                exchange_entry_id=exchange_entry_id,
             )
-            partial_tp     = self._client.round_price(symbol, partial_tp)
-            sl_price       = self._client.round_price(symbol, sig.stop_loss)
-            final_tp_price = self._client.round_price(symbol, sig.take_profit)
+            return ("opened", live_trade_id) if live_trade_id is not None else ("blocked", None)
 
-            # If +1.5R already reaches the final target there is no room for a
-            # two-stage exit: a partial TP clamped to the final TP means the
-            # replacement TP after the partial fill lands at the same price and
-            # Binance rejects it with -2021 "would immediately trigger". Take
-            # the whole position off at the final TP in one order instead.
-            single_stage = (
-                partial_tp <= final_tp_price if sig.signal == "SELL"
-                else partial_tp >= final_tp_price
+    def _finalize_entry(
+        self, symbol: str, direction: str, actual_fill: float, stop_loss: float,
+        take_profit: float, position_size: float, leverage: int,
+        capital_at_risk: float, rr: float, signal_id: int | None,
+        model_version: str | None, exchange_entry_id: str,
+    ) -> int | None:
+        """
+        Recompute bracket prices from the actual fill, place SL/TP, and insert
+        the live_trades row. Shared by the synchronous market-entry path and
+        the async limit-fill handler. Caller must already hold self._lock.
+        """
+        # 9. Recalculate bracket prices from actual fill
+        actual_risk    = abs(actual_fill - stop_loss)
+        partial_tp     = (
+            actual_fill - 1.5 * actual_risk
+            if direction == "SELL"
+            else actual_fill + 1.5 * actual_risk
+        )
+        partial_tp     = self._client.round_price(symbol, partial_tp)
+        sl_price       = self._client.round_price(symbol, stop_loss)
+        final_tp_price = self._client.round_price(symbol, take_profit)
+
+        # If +1.5R already reaches the final target there is no room for a
+        # two-stage exit: a partial TP clamped to the final TP means the
+        # replacement TP after the partial fill lands at the same price and
+        # Binance rejects it with -2021 "would immediately trigger". Take
+        # the whole position off at the final TP in one order instead.
+        single_stage = (
+            partial_tp <= final_tp_price if direction == "SELL"
+            else partial_tp >= final_tp_price
+        )
+
+        half_size      = self._client.round_qty(symbol, position_size / 2)
+        # Round the raw difference before lot-snapping: float dust
+        # (37.33 - 18.66 = 18.669999…) otherwise gets floored one whole
+        # lot-step short, leaving a residual position behind the brackets.
+        remaining_size = self._client.round_qty(
+            symbol, round(position_size - half_size, 8)
+        )
+
+        # Bracket sides are always the opposite of the entry
+        bracket_side = "SELL" if direction == "BUY" else "BUY"
+
+        # 10. Place bracket orders
+        sl_order = tp_order = None
+        try:
+            sl_order = self._client.place_stop_market(
+                symbol, bracket_side, sl_price, position_size
             )
-
-            half_size      = self._client.round_qty(symbol, position_size / 2)
-            # Round the raw difference before lot-snapping: float dust
-            # (37.33 - 18.66 = 18.669999…) otherwise gets floored one whole
-            # lot-step short, leaving a residual position behind the brackets.
-            remaining_size = self._client.round_qty(
-                symbol, round(position_size - half_size, 8)
-            )
-
-            # Bracket sides are always the opposite of the entry
-            bracket_side = "SELL" if sig.signal == "BUY" else "BUY"
-
-            # 10. Place bracket orders
-            sl_order = tp_order = None
+            if single_stage:
+                tp_order = self._client.place_take_profit_market(
+                    symbol, bracket_side, final_tp_price, position_size
+                )
+            else:
+                tp_order = self._client.place_take_profit_market(
+                    symbol, bracket_side, partial_tp, half_size
+                )
+        except Exception as exc:
+            logger.error("[Executor] %s bracket placement failed: %s — emergency close", symbol, exc)
+            # Cancel whatever was placed
+            if sl_order:
+                self._client.cancel_algo_order(symbol, sl_order.get("algoId", ""))
+            # Close position immediately
+            close_side = "SELL" if direction == "BUY" else "BUY"
             try:
-                sl_order = self._client.place_stop_market(
-                    symbol, bracket_side, sl_price, position_size
+                self._client.place_market_order(
+                    symbol, close_side, position_size, reduce_only=True
                 )
-                if single_stage:
-                    tp_order = self._client.place_take_profit_market(
-                        symbol, bracket_side, final_tp_price, position_size
-                    )
-                else:
-                    tp_order = self._client.place_take_profit_market(
-                        symbol, bracket_side, partial_tp, half_size
-                    )
-            except Exception as exc:
-                logger.error("[Executor] %s bracket placement failed: %s — emergency close", symbol, exc)
-                # Cancel whatever was placed
-                if sl_order:
-                    self._client.cancel_algo_order(symbol, sl_order.get("algoId", ""))
-                # Close position immediately
-                close_side = "SELL" if sig.signal == "BUY" else "BUY"
-                try:
-                    self._client.place_market_order(
-                        symbol, close_side, position_size, reduce_only=True
-                    )
-                except Exception as close_exc:
-                    logger.error("[Executor] %s emergency close failed: %s", symbol, close_exc)
-                return None
+            except Exception as close_exc:
+                logger.error("[Executor] %s emergency close failed: %s", symbol, close_exc)
+            return None
 
-            # 11. Insert live_trades row
-            # Single-stage exits are stored with partial_taken=1 and the full
-            # size as remaining: a fill of the TP algo then routes straight to
-            # handle_tp_hit and the whole position closes as target_hit.
-            capital_at_risk = risk_amount
-            rr = sig.risk_reward or 0
-            open_time = _now_ms()
+        # 11. Insert live_trades row
+        # Single-stage exits are stored with partial_taken=1 and the full
+        # size as remaining: a fill of the TP algo then routes straight to
+        # handle_tp_hit and the whole position closes as target_hit.
+        open_time = _now_ms()
 
-            with get_conn() as conn:
-                cur = conn.execute(
-                    """
-                    INSERT INTO live_trades (
-                        symbol, signal_id, direction, status,
-                        entry_price, stop_loss, take_profit, partial_tp_price,
-                        position_size, remaining_size, capital_at_risk,
-                        risk_reward, leverage, open_time, partial_taken,
-                        exchange_entry_id, exchange_sl_id, exchange_tp_id,
-                        original_risk, model_version
-                    ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        symbol, signal_id, sig.signal,
-                        actual_fill, sl_price, final_tp_price,
-                        final_tp_price if single_stage else partial_tp,
-                        position_size,
-                        position_size if single_stage else remaining_size,
-                        capital_at_risk,
-                        rr, leverage, open_time,
-                        1 if single_stage else 0,
-                        exchange_entry_id,
-                        str(sl_order.get("algoId", "")),
-                        str(tp_order.get("algoId", "")),
-                        capital_at_risk,
-                        getattr(sig, "model_version", None),
-                    ),
-                )
-                live_trade_id = cur.lastrowid
-                conn.commit()
-
-            logger.info(
-                "[Executor] %s %s opened  fill=%.4f  sl=%.4f  %s=%.4f  "
-                "size=%.6f  lev=%d×  id=%d",
-                symbol, sig.signal, actual_fill, sl_price,
-                "single_tp" if single_stage else "partial_tp",
-                final_tp_price if single_stage else partial_tp,
-                position_size, leverage, live_trade_id,
+        with get_conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO live_trades (
+                    symbol, signal_id, direction, status,
+                    entry_price, stop_loss, take_profit, partial_tp_price,
+                    position_size, remaining_size, capital_at_risk,
+                    risk_reward, leverage, open_time, partial_taken,
+                    exchange_entry_id, exchange_sl_id, exchange_tp_id,
+                    original_risk, model_version
+                ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    symbol, signal_id, direction,
+                    actual_fill, sl_price, final_tp_price,
+                    final_tp_price if single_stage else partial_tp,
+                    position_size,
+                    position_size if single_stage else remaining_size,
+                    capital_at_risk,
+                    rr, leverage, open_time,
+                    1 if single_stage else 0,
+                    exchange_entry_id,
+                    str(sl_order.get("algoId", "")),
+                    str(tp_order.get("algoId", "")),
+                    capital_at_risk,
+                    model_version,
+                ),
             )
-            return live_trade_id
+            live_trade_id = cur.lastrowid
+            conn.commit()
+
+        logger.info(
+            "[Executor] %s %s opened  fill=%.4f  sl=%.4f  %s=%.4f  "
+            "size=%.6f  lev=%d×  id=%d",
+            symbol, direction, actual_fill, sl_price,
+            "single_tp" if single_stage else "partial_tp",
+            final_tp_price if single_stage else partial_tp,
+            position_size, leverage, live_trade_id,
+        )
+        return live_trade_id
 
     # ── Fill handlers (called from UserDataStream with lock already held) ──────
+
+    def handle_entry_limit_fill(
+        self, pending_id: int, fill_price: float, fill_qty: float,
+    ) -> None:
+        """
+        A resting entry limit order filled. Unlike a simulated paper fill this
+        is irreversible, so guards are re-checked before committing: if the
+        symbol is no longer allowed (cooldown/cap/daily-loss tripped while the
+        order sat resting), the fresh position is market-flattened immediately
+        rather than left open in violation of the guard it would have failed.
+        """
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM live_pending_entries WHERE id=?", (pending_id,)
+            ).fetchone()
+        if not row:
+            logger.warning("[Executor] handle_entry_limit_fill: pending entry %d not found", pending_id)
+            return
+        pending = dict(row)
+        symbol    = pending["symbol"]
+        direction = pending["direction"]
+        position_size = float(pending["position_size"])
+
+        ok, reason = self._check_guards(symbol, direction)
+        if not ok:
+            logger.warning(
+                "[Executor] %s limit entry filled but guard now fails (%s) — "
+                "flattening  id=%d", symbol, reason, pending_id,
+            )
+            close_side = "SELL" if direction == "BUY" else "BUY"
+            try:
+                self._client.place_market_order(symbol, close_side, position_size, reduce_only=True)
+            except Exception as exc:
+                logger.critical(
+                    "[Executor] %s flatten of stale-guard fill FAILED: %s — "
+                    "position may still be open and UNPROTECTED, manual intervention required  "
+                    "pending_id=%d", symbol, exc, pending_id,
+                )
+                live_notify_error(
+                    f"{symbol} stale-guard fill — manual intervention required",
+                    f"Limit entry filled after guard '{reason}' tripped and the emergency "
+                    f"flatten also failed: {exc} — pending_id={pending_id}, "
+                    f"position may still be open and UNPROTECTED.",
+                )
+                return
+            update_live_pending_entry_status(pending_id, "flattened")
+            live_notify_error(
+                f"{symbol} limit entry flattened",
+                f"Filled @ {fill_price:.6f} but guard '{reason}' tripped while the order was "
+                f"resting — position closed immediately rather than left open.",
+            )
+            return
+
+        live_trade_id = self._finalize_entry(
+            symbol=symbol,
+            direction=direction,
+            actual_fill=fill_price,
+            stop_loss=float(pending["stop_loss"]),
+            take_profit=float(pending["take_profit"]),
+            position_size=position_size,
+            leverage=int(pending["leverage"]),
+            capital_at_risk=float(pending["capital_at_risk"]),
+            rr=float(pending["risk_reward"] or 0),
+            signal_id=pending.get("signal_id"),
+            model_version=pending.get("model_version"),
+            exchange_entry_id=pending["exchange_order_id"],
+        )
+        update_live_pending_entry_status(
+            pending_id, "filled" if live_trade_id else "cancelled", live_trade_id
+        )
+        if live_trade_id is not None:
+            with get_conn() as conn:
+                trade_row = conn.execute(
+                    "SELECT * FROM live_trades WHERE id=?", (live_trade_id,)
+                ).fetchone()
+            if trade_row:
+                live_notify_trade_opened(
+                    dict(trade_row), symbol, leverage=int(pending["leverage"]),
+                )
+
+    def check_pending_entries(self) -> None:
+        """
+        Cancel resting limit entries past expiry. Runs on the main thread and
+        holds self._lock for its full duration, same as open_trade — this is
+        what makes a fill-vs-expire race safe: UserDataStream's _dispatch_fill
+        acquires the same lock before touching any pending entry, so a fill
+        event can never interleave with an expiry cancel for the same order.
+        """
+        now_ms = _now_ms()
+        with self._lock:
+            for entry in get_live_pending_entries():
+                if now_ms < int(entry["expiry_ms"]):
+                    continue
+                result = self._client.cancel_order(entry["symbol"], entry["exchange_order_id"])
+                if result:
+                    update_live_pending_entry_status(entry["id"], "expired")
+                    logger.info(
+                        "[Executor] %s pending entry #%d expired and cancelled",
+                        entry["symbol"], entry["id"],
+                    )
+                else:
+                    # Cancel failed/ambiguous — on Binance this usually means the
+                    # order already filled (or was already gone). Don't guess:
+                    # leave it 'pending' so a genuine fill event or the next
+                    # sweep resolves it correctly.
+                    logger.warning(
+                        "[Executor] %s pending entry #%d cancel-at-expiry returned "
+                        "no result — leaving status alone pending resolution",
+                        entry["symbol"], entry["id"],
+                    )
 
     def handle_partial_tp(
         self,

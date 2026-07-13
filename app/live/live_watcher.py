@@ -336,6 +336,12 @@ class LiveTradingWatcher:
         except Exception as exc:
             logger.warning("[LiveWatcher] sync_open_orders failed: %s", exc)
 
+        # Cancel resting entry limit orders past expiry (LIVE_ENTRY_LIMIT_ENABLED)
+        try:
+            self._executor.check_pending_entries()
+        except Exception as exc:
+            logger.warning("[LiveWatcher] check_pending_entries failed: %s", exc)
+
         cycle_signals: list[dict] = []
         for sym in self.symbols:
             if self._is_stopped():
@@ -489,21 +495,26 @@ class LiveTradingWatcher:
             if not passed:
                 console.print(f"  [yellow]Signal filtered: {reason}[/yellow]")
             else:
-                live_trade_id = self._executor.open_trade(symbol, sig, signal_id)
-                if live_trade_id is not None:
+                outcome, result_id = self._executor.open_trade(symbol, sig, signal_id)
+                if outcome == "opened" and result_id is not None:
                     # Fetch the row we just inserted
                     with __import__("app.db.connection", fromlist=["get_conn"]).get_conn() as conn:
                         row = conn.execute(
-                            "SELECT * FROM live_trades WHERE id=?", (live_trade_id,)
+                            "SELECT * FROM live_trades WHERE id=?", (result_id,)
                         ).fetchone()
                     if row:
                         trade = dict(row)
                         console.print(
-                            f"  [green]🔴 LIVE Trade opened #{live_trade_id}  "
+                            f"  [green]🔴 LIVE Trade opened #{result_id}  "
                             f"{sig.signal} @ {trade.get('entry_price'):.4f}  "
                             f"Leverage={_lev}×[/green]"
                         )
                         live_notify_trade_opened(trade, symbol, leverage=_lev)
+                elif outcome == "pending":
+                    console.print(
+                        f"  [yellow]Pending {sig.signal} limit @ {sig.entry_price:.4f}  "
+                        f"(#{result_id}) — waiting for retrace[/yellow]"
+                    )
         elif sig.signal in ("BUY", "SELL") and self.dry_run:
             console.print(f"  [yellow]DRY-RUN — would open {sig.signal} @ {sig.entry_price:.4f}[/yellow]")
 

@@ -402,6 +402,61 @@ def update_pending_order_status(
         )
 
 
+# ── Live pending entries (real resting limit orders) ───────────────────────────
+
+def create_live_pending_entry(d: dict) -> int:
+    sql = """
+        INSERT INTO live_pending_entries
+            (symbol, signal_id, direction, limit_price, stop_loss, take_profit,
+             position_size, leverage, capital_at_risk, risk_reward, model_version,
+             exchange_order_id, created_ms, expiry_ms, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+    """
+    with get_conn() as conn:
+        cur = conn.execute(sql, (
+            d["symbol"], d.get("signal_id"), d["direction"], d["limit_price"],
+            d["stop_loss"], d["take_profit"], d["position_size"], d["leverage"],
+            d["capital_at_risk"], d.get("risk_reward"), d.get("model_version"),
+            d["exchange_order_id"], d["created_ms"], d["expiry_ms"],
+        ))
+        return cur.lastrowid
+
+
+def get_live_pending_entries(symbol: str | None = None) -> list[dict]:
+    with get_conn() as conn:
+        if symbol:
+            rows = conn.execute(
+                "SELECT * FROM live_pending_entries WHERE status='pending' AND symbol=?",
+                (symbol,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM live_pending_entries WHERE status='pending'"
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_live_pending_entry_by_order_id(exchange_order_id: str) -> dict | None:
+    """Look up regardless of status — a late fill that raced an expiry cancel
+    must still be found and finalized, never silently dropped."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM live_pending_entries WHERE exchange_order_id=?",
+            (exchange_order_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def update_live_pending_entry_status(
+    entry_id: int, status: str, filled_trade_id: int | None = None
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE live_pending_entries SET status=?, filled_trade_id=? WHERE id=?",
+            (status, filled_trade_id, entry_id),
+        )
+
+
 def get_closed_pnl_since(since_ms: int) -> float:
     """
     Sum of realized PnL for trades closed at/after since_ms (all symbols).

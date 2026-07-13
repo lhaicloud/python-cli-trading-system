@@ -16,6 +16,7 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+from app.data.repository import get_live_pending_entry_by_order_id
 from app.db.connection import get_conn
 from app.utils.logger import get_logger
 
@@ -261,6 +262,29 @@ class UserDataStream:
     def _dispatch_fill(self, symbol: str, filled_id: str, fill_price: float, fill_qty: float) -> None:
         """Route a filled order/algo id to the matching live_trades row's handler."""
         with self._lock:
+            # Resting entry limit order (LIVE_ENTRY_LIMIT_ENABLED). Looked up by
+            # any status, not just 'pending': a fill that raced an expiry
+            # cancel (status ends up 'expired'/'cancelled' despite a real fill)
+            # must still be honored. But 'filled'/'flattened' means this exact
+            # fill was already processed — Binance can resend order events, and
+            # re-finalizing would insert a duplicate live_trades row.
+            pending = get_live_pending_entry_by_order_id(filled_id)
+            if pending:
+                if pending["status"] in ("filled", "flattened"):
+                    logger.debug(
+                        "[UDS] Duplicate fill event for pending entry #%d "
+                        "(status=%s) — ignoring", pending["id"], pending["status"],
+                    )
+                    return
+                if pending["status"] != "pending":
+                    logger.warning(
+                        "[UDS] Fill for pending entry #%d arrived after status=%s — "
+                        "finalizing anyway", pending["id"], pending["status"],
+                    )
+                logger.info("[UDS] Routing to handle_entry_limit_fill id=%d", pending["id"])
+                self._executor.handle_entry_limit_fill(pending["id"], fill_price, fill_qty)
+                return
+
             with get_conn() as conn:
                 rows = [
                     dict(r) for r in conn.execute(
