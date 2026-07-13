@@ -500,8 +500,8 @@ class LiveExecutor:
                 total_pnl    = None
                 close_status = "open"
 
-            risk    = float(trade.get("capital_at_risk") or 0)
-            pnl_pct = (total_pnl / risk * 100) if (total_pnl is not None and risk) else 0.0
+            equity  = self._client.get_balance()
+            pnl_pct = (total_pnl / equity * 100) if (total_pnl is not None and equity) else 0.0
 
             with get_conn() as conn:
                 conn.execute(
@@ -628,8 +628,8 @@ class LiveExecutor:
             remain_pnl = (entry_price - close_price) * remaining
 
         total_pnl = partial_pnl + remain_pnl
-        risk = float(trade.get("capital_at_risk") or 1)
-        pnl_pct = (total_pnl / risk * 100) if risk else 0.0
+        equity = self._client.get_balance()
+        pnl_pct = (total_pnl / equity * 100) if equity else 0.0
 
         close_time = _now_ms()
         with get_conn() as conn:
