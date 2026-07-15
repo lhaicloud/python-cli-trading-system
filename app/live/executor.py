@@ -263,6 +263,15 @@ class LiveExecutor:
             raw_qty       = position_size_fn(
                 balance, cfg.live_risk_pct, sizing_price, sig.stop_loss, leverage
             )
+            max_notional = balance * leverage * cfg.live_margin_buffer
+            if raw_qty * sizing_price > max_notional:
+                clamped = max_notional / sizing_price
+                logger.info(
+                    "[Executor] %s size clamped for margin headroom: %.6f → %.6f "
+                    "(notional cap $%.2f)",
+                    symbol, raw_qty, clamped, max_notional,
+                )
+                raw_qty = clamped
             position_size = self._client.round_qty(symbol, raw_qty)
             if position_size <= 0:
                 logger.warning("[Executor] %s position size rounds to zero — skip", symbol)

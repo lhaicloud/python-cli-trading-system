@@ -147,6 +147,12 @@ class Settings(BaseSettings):
     # Force-close stagnating trades after this many hours (96 × 30m candles).
     max_trade_age_hours: float = Field(48.0, env="MAX_TRADE_AGE_HOURS")
 
+    # Fraction of available balance a single live position's notional may use.
+    # position_size() caps notional at capital × leverage with zero headroom, so
+    # near-cap orders fail Binance margin checks (-2019: taker fee + mark-price
+    # drift) — seen 4× in a month (HYPE/FET×2/TRX), delaying entries 60-90 min.
+    live_margin_buffer: float = Field(0.95, env="LIVE_MARGIN_BUFFER")
+
     # ── Partial take-profit ───────────────────────────────────────────────────
     partial_tp_enabled:  bool  = Field(True, env="PARTIAL_TP_ENABLED")
     partial_tp_r:        float = Field(1.5,  env="PARTIAL_TP_R")        # trigger at +1.5R
