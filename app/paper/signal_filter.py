@@ -180,6 +180,10 @@ class SignalFilter:
         Block entries in distribution (ranging/choppy) regimes.
         Win rate in distribution was 50% — coin-flip, no edge.
         """
+        cfg = get_settings()
+        forced_on = sig.symbol.upper() in cfg.filter_distribution_symbol_set
+        if not cfg.filter_distribution_enabled and not forced_on:
+            return True, ""
         regime = (sig.market_regime or "").lower()
         if regime in _NO_TRADE_REGIMES:
             return False, (
@@ -194,6 +198,8 @@ class SignalFilter:
         Low-liquidity Asia dead zone (01-04) and NY chop hours (13, 15, 23)
         consistently produce stopped trades.
         """
+        if not get_settings().filter_hours_enabled:
+            return True, ""
         ref_s = (self._now_ms / 1000) if self._now_ms else time.time()
         utc_hour = time.gmtime(ref_s).tm_hour
         if utc_hour in _BLOCKED_HOURS_UTC:

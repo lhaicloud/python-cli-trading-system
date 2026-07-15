@@ -167,6 +167,23 @@ class Settings(BaseSettings):
     # reuses entry_limit_expiry_candles / entry_limit_min_gap_pct for its knobs.
     live_entry_limit_enabled:   bool  = Field(False, env="LIVE_ENTRY_LIMIT_ENABLED")
 
+    # ── SignalFilter A/B toggles ──────────────────────────────────────────────
+    # Both filters were fit on very small samples (16 and ~8 trades, 2026-06-09).
+    # A/B matrix 2026-07 (4 variants × 8 symbols, backtest variants filter_ab_*):
+    # disabling BOTH gave +33% net PnL at equal max drawdown. Defaults stay True;
+    # production disables via .env so the code default remains conservative.
+    filter_distribution_enabled: bool = Field(True, env="FILTER_DISTRIBUTION_ENABLED")
+    filter_hours_enabled:        bool = Field(True, env="FILTER_HOURS_ENABLED")
+
+    # Symbols where the distribution filter applies even when globally disabled.
+    # SOLUSDT was the one coin the A/B matrix showed the filter still helping
+    # (PF collapsed to ~1.1 without it). Comma-separated, like STRICT_SYMBOLS.
+    filter_distribution_symbols: str = Field("", env="FILTER_DISTRIBUTION_SYMBOLS")
+
+    @property
+    def filter_distribution_symbol_set(self) -> set[str]:
+        return {s.strip().upper() for s in self.filter_distribution_symbols.split(",") if s.strip()}
+
     # ── Funding-rate filter (futures sentiment) ───────────────────────────────
     # Block SELLs when funding is already strongly negative (crowded short,
     # squeeze risk) and BUYs when strongly positive. 0.0005 = 0.05% per 8h.
