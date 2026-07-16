@@ -219,6 +219,29 @@ class LiveExecutor:
             )
             use_limit_entry = cfg.live_entry_limit_enabled and needs_retrace
 
+            # Buffered limit price: rest at whatever price yields target_rr
+            # (computed from the signal's own fixed stop/take-profit) rather
+            # than the full zone price. Clamp so it never asks for a price
+            # better than the zone itself — that's the ceiling on how good a
+            # resting price makes sense; only bites if target_rr is
+            # misconfigured above the signal's promised R:R.
+            buffered_limit_price = buffered_limit_rr = None
+            if use_limit_entry:
+                target_rr = cfg.live_entry_limit_target_rr
+                raw_target = (sig.take_profit + target_rr * sig.stop_loss) / (1 + target_rr)
+                if sig.signal == "BUY":
+                    buffered_limit_price = max(raw_target, sig.entry_price)
+                    buffered_limit_rr = (
+                        (sig.take_profit - buffered_limit_price)
+                        / (buffered_limit_price - sig.stop_loss)
+                    )
+                else:
+                    buffered_limit_price = min(raw_target, sig.entry_price)
+                    buffered_limit_rr = (
+                        (buffered_limit_price - sig.take_profit)
+                        / (sig.stop_loss - buffered_limit_price)
+                    )
+
             if not use_limit_entry:
                 # Entry-price revalidation. The signal's entry_price comes from
                 # candle-close analysis and can be far from where a market order
@@ -255,10 +278,10 @@ class LiveExecutor:
 
             # 5. Position sizing. Market path sizes from the executable (mark)
             # price so capital at risk stays at live_risk_pct of balance even
-            # when price has drifted. Limit path sizes from the resting limit
-            # price itself — that's the price the position will actually be
-            # risked at once filled.
-            sizing_price  = sig.entry_price if use_limit_entry else exec_price
+            # when price has drifted. Limit path sizes from the buffered
+            # resting price itself — that's the price the position will
+            # actually be risked at once filled.
+            sizing_price  = buffered_limit_price if use_limit_entry else exec_price
             risk_amount   = balance * cfg.live_risk_pct / 100
             raw_qty       = position_size_fn(
                 balance, cfg.live_risk_pct, sizing_price, sig.stop_loss, leverage
@@ -293,7 +316,7 @@ class LiveExecutor:
             entry_side = "BUY" if sig.signal == "BUY" else "SELL"
 
             if use_limit_entry:
-                limit_price = self._client.round_price(symbol, sig.entry_price)
+                limit_price = self._client.round_price(symbol, buffered_limit_price)
                 try:
                     entry_resp = self._client.place_limit_order(
                         symbol, entry_side, position_size, limit_price
@@ -313,17 +336,17 @@ class LiveExecutor:
                     "position_size":     position_size,
                     "leverage":          leverage,
                     "capital_at_risk":   risk_amount,
-                    "risk_reward":       round(sig.risk_reward or 0, 2),
+                    "risk_reward":       round(buffered_limit_rr, 2),
                     "model_version":     getattr(sig, "model_version", None),
                     "exchange_order_id": str(entry_resp.get("orderId", "")),
                     "created_ms":        now_ms,
                     "expiry_ms":         now_ms + cfg.entry_limit_expiry_candles * 30 * 60 * 1000,
                 })
                 logger.info(
-                    "[Executor] %s Pending %s limit @ %.6f (mark %.6f), "
-                    "expires in %d candles  id=%d",
-                    symbol, sig.signal, limit_price, exec_price,
-                    cfg.entry_limit_expiry_candles, pending_id,
+                    "[Executor] %s Pending %s limit @ %.6f (target R:R %.2f, zone %.6f, "
+                    "mark %.6f), expires in %d candles  id=%d",
+                    symbol, sig.signal, limit_price, buffered_limit_rr, sig.entry_price,
+                    exec_price, cfg.entry_limit_expiry_candles, pending_id,
                 )
                 return "pending", pending_id
 

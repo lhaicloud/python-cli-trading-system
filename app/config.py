@@ -169,9 +169,28 @@ class Settings(BaseSettings):
     # If |entry - current| is below this %, fill at market immediately.
     entry_limit_min_gap_pct:    float = Field(0.05, env="ENTRY_LIMIT_MIN_GAP_PCT")
     # Independent live-only switch (real resting order on the exchange, not the
-    # simulated paper one above). Off by default — untested against real fills;
-    # reuses entry_limit_expiry_candles / entry_limit_min_gap_pct for its knobs.
+    # simulated paper one above). Reuses entry_limit_expiry_candles /
+    # entry_limit_min_gap_pct for its knobs.
+    # 2026-07-15 production run: rested AT the zone price like the paper
+    # version above, 0/6 fills — same "winners don't retrace" failure, worse
+    # (paper at least fills at market as a fallback; live just expires and
+    # skips the trade entirely). Reverted to off 2026-07-16.
     live_entry_limit_enabled:   bool  = Field(False, env="LIVE_ENTRY_LIMIT_ENABLED")
+    # 2026-07-16 redesign: rest at whatever price yields this R:R (computed
+    # from the signal's own stop/take-profit) instead of the full zone price.
+    # Counterfactual on 104 historical paper trades: chasing the drifted
+    # market price destroys ~87% of edge (93R zone-price -> 12R market-price),
+    # but the R:R floor is correctly directional (floor-passing trades average
+    # +0.18R at market vs +0.08R for floor-blocked) — most of the strategy's
+    # edge sits in the trades a market order can't reach. This is the
+    # untested middle ground: ask for less retrace than the full zone price
+    # (better fill odds than the 0/6 above) while still landing comfortably
+    # above live_min_rr once filled. Must stay > live_min_rr and materially
+    # below the ~1.8-2.6 typical promised R:R (min_rr_ratio=1.8 is the floor
+    # for a signal to be generated at all, so there's always room above 1.6).
+    # Untuned — no historical fill-rate simulation has been run for this
+    # specific price target yet.
+    live_entry_limit_target_rr: float = Field(1.6, env="LIVE_ENTRY_LIMIT_TARGET_RR")
 
     # ── SignalFilter A/B toggles ──────────────────────────────────────────────
     # Both filters were fit on very small samples (16 and ~8 trades, 2026-06-09).
