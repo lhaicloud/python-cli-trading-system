@@ -61,8 +61,16 @@ class LiveExecutor:
 
     # ── Guard checks ─────────────────────────────────────────────────────────
 
-    def _check_guards(self, symbol: str, direction: str) -> tuple[bool, str]:
-        """Return (ok, reason). Does NOT acquire lock — caller must hold it."""
+    def _check_guards(
+        self, symbol: str, direction: str, exclude_pending_id: int | None = None
+    ) -> tuple[bool, str]:
+        """Return (ok, reason). Does NOT acquire lock — caller must hold it.
+
+        exclude_pending_id: when re-checking guards for a resting limit order
+        that just filled, its own live_pending_entries row is still status
+        'pending' at this point — exclude it so it isn't mistaken for a
+        conflicting reservation on itself.
+        """
         cfg = self._cfg
         now_ms = _now_ms()
 
@@ -114,7 +122,10 @@ class LiveExecutor:
                 return False, f"already have open live trade for {symbol}"
 
         # A resting limit entry also reserves the per-symbol slot
-        if get_live_pending_entries(symbol):
+        pending = get_live_pending_entries(symbol)
+        if exclude_pending_id is not None:
+            pending = [p for p in pending if p["id"] != exclude_pending_id]
+        if pending:
             return False, f"pending limit entry already placed for {symbol}"
 
         return True, ""
@@ -532,7 +543,7 @@ class LiveExecutor:
         direction = pending["direction"]
         position_size = float(pending["position_size"])
 
-        ok, reason = self._check_guards(symbol, direction)
+        ok, reason = self._check_guards(symbol, direction, exclude_pending_id=pending_id)
         if not ok:
             logger.warning(
                 "[Executor] %s limit entry filled but guard now fails (%s) — "
