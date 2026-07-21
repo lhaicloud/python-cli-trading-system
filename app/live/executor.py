@@ -98,8 +98,8 @@ class LiveExecutor:
                 (today_start,),
             ).fetchone()[0] or 0.0
 
-            balance = self._client.get_balance()
-            daily_loss_limit = -(balance * cfg.live_max_daily_loss_pct / 100)
+            equity = self._client.get_equity()
+            daily_loss_limit = -(equity * cfg.live_max_daily_loss_pct / 100)
             if daily_pnl <= daily_loss_limit:
                 return False, f"daily loss breaker (PnL={daily_pnl:.2f} ≤ {daily_loss_limit:.2f})"
 
@@ -194,10 +194,14 @@ class LiveExecutor:
                 logger.info("[Executor] %s BLOCKED — %s", symbol, reason)
                 return "blocked", None
 
-            # 2. Live balance → risk amount
-            balance = self._client.get_balance()
-            if balance <= 0:
-                logger.warning("[Executor] %s skipped — zero USDT balance", symbol)
+            # 2. Live equity → risk amount. Sizing intent is based on stable
+            # equity (wallet + unrealized), not availableBalance, which swings
+            # with whatever margin other resting orders happen to have locked
+            # at this instant. The actual exchange-margin constraint is
+            # applied separately below via max_notional.
+            equity = self._client.get_equity()
+            if equity <= 0:
+                logger.warning("[Executor] %s skipped — zero USDT equity", symbol)
                 return "blocked", None
 
             # 3. Leverage
@@ -293,11 +297,15 @@ class LiveExecutor:
             # resting price itself — that's the price the position will
             # actually be risked at once filled.
             sizing_price  = buffered_limit_price if use_limit_entry else exec_price
-            risk_amount   = balance * cfg.live_risk_pct / 100
+            risk_amount   = equity * cfg.live_risk_pct / 100
             raw_qty       = position_size_fn(
-                balance, cfg.live_risk_pct, sizing_price, sig.stop_loss, leverage
+                equity, cfg.live_risk_pct, sizing_price, sig.stop_loss, leverage
             )
-            max_notional = balance * leverage * cfg.live_margin_buffer
+            # Exchange-margin constraint: this must track real free margin
+            # (availableBalance), not equity — the exchange rejects orders
+            # against margin it doesn't actually have free right now.
+            available    = self._client.get_balance()
+            max_notional = available * leverage * cfg.live_margin_buffer
             if raw_qty * sizing_price > max_notional:
                 clamped = max_notional / sizing_price
                 logger.info(
@@ -788,7 +796,7 @@ class LiveExecutor:
                 total_pnl    = None
                 close_status = "open"
 
-            equity  = self._client.get_balance()
+            equity  = self._client.get_equity()
             pnl_pct = (total_pnl / equity * 100) if (total_pnl is not None and equity) else 0.0
 
             with get_conn() as conn:
@@ -916,7 +924,7 @@ class LiveExecutor:
             remain_pnl = (entry_price - close_price) * remaining
 
         total_pnl = partial_pnl + remain_pnl
-        equity = self._client.get_balance()
+        equity = self._client.get_equity()
         pnl_pct = (total_pnl / equity * 100) if equity else 0.0
 
         close_time = _now_ms()

@@ -178,6 +178,12 @@ class BinanceExchangeClient:
                 }
         return {"wallet": 0.0, "unrealized": 0.0, "available": 0.0, "margin_used": 0.0}
 
+    def get_equity(self) -> float:
+        """Return true account equity (wallet balance + unrealized PnL) — unlike
+        get_balance()'s availableBalance, this doesn't swing with locked order margin."""
+        bal = self.get_wallet_balance()
+        return bal["wallet"] + bal["unrealized"]
+
     def get_position(self, symbol: str) -> dict | None:
         """Return open position info for symbol, or None if flat."""
         data = self._request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})

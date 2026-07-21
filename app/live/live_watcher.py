@@ -438,9 +438,10 @@ class LiveTradingWatcher:
         except Exception as exc:
             logger.warning("[LiveWatcher][%s] update_excursion failed: %s", symbol, exc)
 
-        # 3. Generate signal — use live balance as capital basis
+        # 3. Generate signal — use live equity (not availableBalance, which
+        # swings with locked order margin) as capital basis
         try:
-            capital = self._client.get_balance()
+            capital = self._client.get_equity()
         except Exception:
             capital = get_settings().default_capital
 
