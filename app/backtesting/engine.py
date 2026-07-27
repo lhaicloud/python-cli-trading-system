@@ -136,6 +136,7 @@ def run_backtest(
     blocked_count = 0
     hold_count = 0
     filtered_count = 0
+    drift_skipped_count = 0
     # Same pre-trade quality gate the live watcher runs — without it the
     # backtest trades a different (looser) strategy than live.
     sig_filter = SignalFilter()
@@ -465,6 +466,26 @@ def run_backtest(
             # Market entries pay slippage; limit fills execute at the limit
             entry = sig.entry_price
             if not needs_retrace:
+                # Drift gate — parity with PositionManager._entry_drift_blocked
+                # and LiveExecutor.open_trade. sig.entry_price is a candle-close
+                # level; by fill time price has drifted to cur_px. Measure R:R
+                # from cur_px and skip market entries where drift has crushed it
+                # below live_min_rr, so backtests stop banking idealized fills
+                # live can never reach (the paper/live gap driver).
+                if cfg.paper_drift_gate_enabled and cur_px > 0:
+                    sl_dist = abs(cur_px - sig.stop_loss)
+                    wrong_side = (
+                        cur_px <= sig.stop_loss if sig.signal == "BUY"
+                        else cur_px >= sig.stop_loss
+                    )
+                    reward = (
+                        sig.take_profit - cur_px if sig.signal == "BUY"
+                        else cur_px - sig.take_profit
+                    )
+                    if sl_dist == 0 or wrong_side or reward / sl_dist < cfg.live_min_rr:
+                        drift_skipped_count += 1
+                        progress.advance(task)
+                        continue
                 if sig.signal == "BUY":
                     entry *= (1 + slippage_pct)
                 else:
@@ -594,6 +615,7 @@ def run_backtest(
     metrics["blocked_count"] = blocked_count
     metrics["hold_count"] = hold_count
     metrics["filtered_count"] = filtered_count
+    metrics["drift_skipped_count"] = drift_skipped_count
 
     # Persist results
     run_id = save_backtest_run({
