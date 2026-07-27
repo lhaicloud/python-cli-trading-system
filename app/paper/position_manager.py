@@ -225,6 +225,45 @@ class PositionManager:
 
     # ── Submit (limit-or-market) ──────────────────────────────────────────────
 
+    def _entry_drift_blocked(
+        self, symbol: str, sig: "SignalResult", current_price: float | None
+    ) -> bool:
+        """R:R revalidation at the executable price — parity with
+        LiveExecutor.open_trade (executor.py). Paper otherwise fills at the
+        idealized candle-close sig.entry_price; if drift has pushed price past
+        the stop or crushed R:R below live_min_rr, skip so the paper record
+        forecasts what live would actually take. No-op when the gate is disabled
+        or no current price is available (drift can't be measured)."""
+        cfg = get_settings()
+        if (not cfg.paper_drift_gate_enabled
+                or current_price is None or current_price <= 0):
+            return False
+        sl_distance = abs(current_price - sig.stop_loss)
+        wrong_side = (
+            current_price <= sig.stop_loss if sig.signal == "BUY"
+            else current_price >= sig.stop_loss
+        )
+        if sl_distance == 0 or wrong_side:
+            logger.info(
+                "[PM][%s] SKIPPED — price %.6f already beyond stop %.6f",
+                symbol, current_price, sig.stop_loss,
+            )
+            return True
+        reward = (
+            sig.take_profit - current_price if sig.signal == "BUY"
+            else current_price - sig.take_profit
+        )
+        live_rr = reward / sl_distance
+        if live_rr < cfg.live_min_rr:
+            logger.info(
+                "[PM][%s] SKIPPED — R:R at price %.6f is %.2f "
+                "(signal entry %.6f promised %.2f, floor %.2f)",
+                symbol, current_price, live_rr, sig.entry_price,
+                sig.risk_reward or 0, cfg.live_min_rr,
+            )
+            return True
+        return False
+
     def submit(
         self,
         symbol: str,
@@ -246,6 +285,8 @@ class PositionManager:
             return "blocked", None
 
         if not cfg.entry_limit_enabled or current_price is None or current_price <= 0:
+            if self._entry_drift_blocked(symbol, sig, current_price):
+                return "blocked", None
             trade_id = self.open(symbol, sig, capital, signal_id)
             return ("opened", trade_id) if trade_id else ("blocked", None)
 
@@ -257,6 +298,8 @@ class PositionManager:
             else sig.entry_price > current_price * (1 + gap)
         )
         if not needs_retrace:
+            if self._entry_drift_blocked(symbol, sig, current_price):
+                return "blocked", None
             trade_id = self.open(symbol, sig, capital, signal_id)
             return ("opened", trade_id) if trade_id else ("blocked", None)
 

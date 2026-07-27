@@ -192,6 +192,18 @@ class Settings(BaseSettings):
     # specific price target yet.
     live_entry_limit_target_rr: float = Field(1.6, env="LIVE_ENTRY_LIMIT_TARGET_RR")
 
+    # ── Paper drift gate (live/paper fill parity) ─────────────────────────────
+    # Paper fills at the signal's candle-close entry_price; the live executor
+    # instead re-measures R:R from the *current* price at execution time and
+    # skips when drift has crushed it below live_min_rr (executor.py open_trade).
+    # Without this, paper banks idealized fills live can never reach (e.g. strong
+    # trends where price runs past the zone before entry), inflating the paper
+    # record vs live. When enabled, PositionManager.submit() applies the SAME
+    # revalidation so the paper track record forecasts what live would take.
+    # Reuses live_min_rr as the floor. Only gates market entries — a resting
+    # limit fills at its own price, so the pending-order path is unaffected.
+    paper_drift_gate_enabled:   bool  = Field(True, env="PAPER_DRIFT_GATE_ENABLED")
+
     # ── SignalFilter A/B toggles ──────────────────────────────────────────────
     # Both filters were fit on very small samples (16 and ~8 trades, 2026-06-09).
     # A/B matrix 2026-07 (4 variants × 8 symbols, backtest variants filter_ab_*):
