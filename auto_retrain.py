@@ -62,8 +62,12 @@ perf = _post_promotion_stats(conn)
 
 # ── 2. Retrain ─────────────────────────────────────────────────────────────────
 cur = conn.cursor()
+# Picks symbols by honest-label count only — fill_model='zone' rows describe
+# entries at prices the market never offered, so they must not qualify a symbol
+# for retraining (see realistic_entry_fill in config.py).
 cur.execute(
     "SELECT symbol FROM feature_snapshots WHERE outcome IS NOT NULL "
+    "AND fill_model='market' "
     "GROUP BY symbol HAVING COUNT(*) >= ?",
     (MIN_SAMPLES,)
 )

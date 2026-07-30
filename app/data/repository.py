@@ -617,15 +617,16 @@ def get_paper_trade_summary(symbol: str | None = None) -> dict:
 def save_backtest_run(run: dict[str, Any]) -> int:
     if isinstance(run.get("metrics"), dict):
         run = {**run, "metrics": json.dumps(run["metrics"])}
+    run = {"fill_model": current_fill_model(), **run}
     sql = """
         INSERT INTO backtest_runs
             (symbol, start_time, end_time, initial_capital, final_capital,
              total_trades, win_rate, profit_factor, max_drawdown, net_profit,
-             metrics, model_version)
+             metrics, model_version, fill_model)
         VALUES
             (:symbol, :start_time, :end_time, :initial_capital, :final_capital,
              :total_trades, :win_rate, :profit_factor, :max_drawdown,
-             :net_profit, :metrics, :model_version)
+             :net_profit, :metrics, :model_version, :fill_model)
     """
     with get_conn() as conn:
         conn.execute(sql, run)
@@ -710,25 +711,46 @@ def get_active_model(symbol: str, model_type: str) -> dict | None:
 
 # ── Feature snapshot helpers ──────────────────────────────────────────────────
 
+def current_fill_model() -> str:
+    """'market' when entries fill at the executable price, 'zone' when they fill
+    at the signal's zone level. Stamped on every training label so the models
+    are never fit on outcomes from fills that could not have happened."""
+    from app.config import get_settings
+    return "market" if get_settings().realistic_entry_fill else "zone"
+
+
 def save_feature_snapshot(snap: dict[str, Any]) -> None:
     if isinstance(snap.get("features"), dict):
         snap = {**snap, "features": json.dumps(snap["features"])}
+    snap = {"fill_model": current_fill_model(), **snap}
     sql = """
         INSERT INTO feature_snapshots
-            (signal_id, symbol, timestamp, features, outcome, pnl)
+            (signal_id, symbol, timestamp, features, outcome, pnl, fill_model)
         VALUES
-            (:signal_id, :symbol, :timestamp, :features, :outcome, :pnl)
+            (:signal_id, :symbol, :timestamp, :features, :outcome, :pnl, :fill_model)
     """
     with get_conn() as conn:
         conn.execute(sql, snap)
 
 
-def get_feature_snapshots(symbol: str, outcome: str | None = None) -> list[dict]:
+def get_feature_snapshots(
+    symbol: str,
+    outcome: str | None = None,
+    fill_model: str | None = "market",
+) -> list[dict]:
+    """Labeled training rows for a symbol.
+
+    fill_model defaults to 'market' so callers get only labels whose outcome
+    came from an obtainable entry price. Pass None to read every row regardless
+    of provenance (audits and back-compat reporting only — never training)."""
     clauses = ["symbol=?"]
     params: list[Any] = [symbol]
     if outcome:
         clauses.append("outcome=?")
         params.append(outcome)
+    if fill_model:
+        clauses.append("fill_model=?")
+        params.append(fill_model)
     sql = f"SELECT * FROM feature_snapshots WHERE {' AND '.join(clauses)} ORDER BY timestamp ASC"
     with get_conn() as conn:
         rows = conn.execute(sql, params).fetchall()

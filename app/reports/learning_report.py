@@ -27,7 +27,9 @@ def print_learning_report(symbol: str) -> None:
         border_style="magenta",
     ))
 
-    snapshots = get_feature_snapshots(symbol)
+    # Reporting shows the full history regardless of fill provenance — the
+    # default 'market' filter is for training, where fiction would be learned.
+    snapshots = get_feature_snapshots(symbol, fill_model=None)
     wins   = [s for s in snapshots if s.get("outcome") == "win"]
     losses = [s for s in snapshots if s.get("outcome") == "loss"]
     open_  = [s for s in snapshots if s.get("outcome") is None]

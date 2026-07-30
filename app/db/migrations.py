@@ -134,5 +134,24 @@ def run_migrations() -> None:
             CREATE INDEX IF NOT EXISTS idx_live_trades_symbol
                 ON live_trades(symbol, status)
         """)
+
+        # Fill-model provenance. Every row written before 2026-07-30 was
+        # produced by filling market entries at sig.entry_price — a zone
+        # *level*, not a price on offer — so 82% of them record outcomes from
+        # trades that could not have happened (see realistic_entry_fill in
+        # config.py). ML labels inherit that, so training data has to be
+        # separable by fill model or the models learn the fiction.
+        #
+        # Deliberately NOT folded into ENGINE_VERSION / model_version: that
+        # column gates the validated coin pool, and retagging it would
+        # invalidate the pool as a side effect of an ML fix. This axis is
+        # orthogonal — 'zone' = the old unobtainable fills, 'market' = fills at
+        # the executable price.
+        for table in ("feature_snapshots", "backtest_runs"):
+            _safe_alter(conn, f"ALTER TABLE {table} ADD COLUMN fill_model TEXT")
+            # Existing rows predate the fix by definition.
+            conn.execute(
+                f"UPDATE {table} SET fill_model='zone' WHERE fill_model IS NULL"
+            )
         conn.commit()
     logger.info("Migrations complete.")
