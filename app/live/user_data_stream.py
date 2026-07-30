@@ -12,6 +12,7 @@ arrived during the outage.
 from __future__ import annotations
 
 import json
+import random
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -27,6 +28,15 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _KEEPALIVE_INTERVAL = 20 * 60   # PUT listenKey every 20 minutes
+
+# Reconnect backoff. A flat 5s retry turns a DNS outage into a hot loop: each
+# attempt fails resolution, immediately re-resolves for a fresh listenKey, and
+# fails again — 2026-07-29 05:18-05:25 produced ~53 name-resolution errors in
+# one 7-minute window. Back off exponentially with jitter so a sustained
+# network fault costs one attempt a minute instead of one every five seconds.
+_RECONNECT_BASE_S    = 5.0
+_RECONNECT_MAX_S     = 60.0
+_RECONNECT_HEALTHY_S = 120.0    # session this long counts as recovered
 
 
 class UserDataStream:
@@ -79,14 +89,30 @@ class UserDataStream:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _run(self) -> None:
+        attempt = 0
         while not self._stop_flag.is_set():
+            started = time.monotonic()
             try:
                 self._connect_and_listen()
             except Exception as exc:
                 if self._stop_flag.is_set():
                     break
-                logger.warning("[UDS] Connection error: %s — reconnecting in 5s", exc)
-                time.sleep(5)
+                # _connect_and_listen only ever returns by raising, so the
+                # backoff resets on session length rather than on a clean
+                # return: a stream that stayed up past the healthy threshold
+                # was a working connection, not part of a failure streak.
+                if time.monotonic() - started >= _RECONNECT_HEALTHY_S:
+                    attempt = 0
+                delay = min(_RECONNECT_BASE_S * 2 ** attempt, _RECONNECT_MAX_S)
+                delay *= 0.5 + random.random()   # ±50% jitter
+                attempt += 1
+                logger.warning(
+                    "[UDS] Connection error: %s — reconnecting in %.1fs (attempt %d)",
+                    exc, delay, attempt,
+                )
+                # Wait on the stop flag so shutdown isn't held up by a long sleep.
+                if self._stop_flag.wait(timeout=delay):
+                    break
                 self._on_disconnect()
 
     def _connect_and_listen(self) -> None:

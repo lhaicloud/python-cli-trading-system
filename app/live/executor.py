@@ -90,6 +90,22 @@ class LiveExecutor:
             if dir_count >= cfg.live_max_same_dir:
                 return False, f"same-dir cap {direction} ({dir_count}/{cfg.live_max_same_dir})"
 
+            equity = self._client.get_equity()
+
+            # Portfolio open-risk budget — parity with paper's guard 4
+            # (position_manager._can_open). The count caps above bound how many
+            # positions may be open, not how much they collectively risk.
+            open_risk = conn.execute(
+                "SELECT SUM(CAST(capital_at_risk AS REAL)) FROM live_trades "
+                "WHERE status='open'"
+            ).fetchone()[0] or 0.0
+            max_open_risk = equity * cfg.max_open_risk_pct / 100
+            if open_risk >= max_open_risk:
+                return False, (
+                    f"open-risk budget (${open_risk:,.2f} at risk ≥ "
+                    f"{cfg.max_open_risk_pct:.1f}% of ${equity:,.2f} equity)"
+                )
+
             # Daily loss breaker
             today_start = now_ms - (now_ms % 86_400_000)
             daily_pnl = conn.execute(
@@ -98,7 +114,6 @@ class LiveExecutor:
                 (today_start,),
             ).fetchone()[0] or 0.0
 
-            equity = self._client.get_equity()
             daily_loss_limit = -(equity * cfg.live_max_daily_loss_pct / 100)
             if daily_pnl <= daily_loss_limit:
                 return False, f"daily loss breaker (PnL={daily_pnl:.2f} ≤ {daily_loss_limit:.2f})"
@@ -297,10 +312,10 @@ class LiveExecutor:
             # resting price itself — that's the price the position will
             # actually be risked at once filled.
             sizing_price  = buffered_limit_price if use_limit_entry else exec_price
-            risk_amount   = equity * cfg.live_risk_pct / 100
-            raw_qty       = position_size_fn(
+            intended_qty  = position_size_fn(
                 equity, cfg.live_risk_pct, sizing_price, sig.stop_loss, leverage
             )
+            raw_qty       = intended_qty
             # Exchange-margin constraint: this must track real free margin
             # (availableBalance), not equity — the exchange rejects orders
             # against margin it doesn't actually have free right now.
@@ -318,6 +333,27 @@ class LiveExecutor:
             if position_size <= 0:
                 logger.warning("[Executor] %s position size rounds to zero — skip", symbol)
                 return "blocked", None
+
+            # A position clamped to a sliver of its intended size isn't the trade
+            # the signal asked for — it pays full fee and spread to carry
+            # noise-level exposure and then reports as a real result. Skip it.
+            fill_fraction = position_size / intended_qty if intended_qty > 0 else 0.0
+            if cfg.live_min_fill_fraction > 0 and fill_fraction < cfg.live_min_fill_fraction:
+                logger.warning(
+                    "[Executor] %s SKIPPED — margin headroom covers only %.1f%% of the "
+                    "intended size (%.6f of %.6f, floor %.0f%%)",
+                    symbol, fill_fraction * 100, position_size, intended_qty,
+                    cfg.live_min_fill_fraction * 100,
+                )
+                return "blocked", None
+
+            # Risk of the size actually going on, not the sizing intent. The two
+            # diverge by up to 90× once the margin clamp and lot rounding bite,
+            # and this figure is what the open-risk budget, R-multiples and every
+            # report downstream read. The market path refines it again in
+            # _finalize_entry once the true fill price is known; a resting limit
+            # fills at its own price, so this value is already exact for it.
+            risk_amount = position_size * abs(sizing_price - sig.stop_loss)
 
             # 6. Preflight exchange checks
             ok, reason = self._preflight(symbol, sig.signal)
@@ -400,7 +436,6 @@ class LiveExecutor:
                 take_profit=sig.take_profit,
                 position_size=position_size,
                 leverage=leverage,
-                capital_at_risk=risk_amount,
                 rr=sig.risk_reward or 0,
                 signal_id=signal_id,
                 model_version=getattr(sig, "model_version", None),
@@ -411,16 +446,25 @@ class LiveExecutor:
     def _finalize_entry(
         self, symbol: str, direction: str, actual_fill: float, stop_loss: float,
         take_profit: float, position_size: float, leverage: int,
-        capital_at_risk: float, rr: float, signal_id: int | None,
+        rr: float, signal_id: int | None,
         model_version: str | None, exchange_entry_id: str,
     ) -> int | None:
         """
         Recompute bracket prices from the actual fill, place SL/TP, and insert
         the live_trades row. Shared by the synchronous market-entry path and
         the async limit-fill handler. Caller must already hold self._lock.
+
+        Capital at risk is derived here rather than passed in: only at this
+        point are both the true fill price and the post-clamp, lot-rounded size
+        known, and it is the product of the two that the risk budget spends.
         """
         # 9. Recalculate bracket prices from actual fill
         actual_risk    = abs(actual_fill - stop_loss)
+        # Stored in two units on purpose, matching paper_trades:
+        #   capital_at_risk — USD the stop is worth at this size
+        #   original_risk   — the entry→stop price distance, the 1R denominator
+        #                     that survives the ratchet mutating stop_loss
+        capital_at_risk = position_size * actual_risk
         partial_tp     = (
             actual_fill - 1.5 * actual_risk
             if direction == "SELL"
@@ -510,7 +554,7 @@ class LiveExecutor:
                     exchange_entry_id,
                     str(sl_order.get("algoId", "")),
                     str(tp_order.get("algoId", "")),
-                    capital_at_risk,
+                    round(actual_risk, 6),
                     model_version,
                 ),
             )
@@ -589,7 +633,6 @@ class LiveExecutor:
             take_profit=float(pending["take_profit"]),
             position_size=position_size,
             leverage=int(pending["leverage"]),
-            capital_at_risk=float(pending["capital_at_risk"]),
             rr=float(pending["risk_reward"] or 0),
             signal_id=pending.get("signal_id"),
             model_version=pending.get("model_version"),

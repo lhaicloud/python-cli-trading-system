@@ -120,6 +120,16 @@ class BinanceClient:
         data = self._get("/fapi/v1/ticker/price", params={"symbol": symbol.upper()})
         return float(data["price"])
 
+    def get_mark_price(self, symbol: str) -> float:
+        """
+        Current mark price — the same endpoint and field the live executor
+        reads (app/live/exchange.py get_mark_price). Paper's entry-drift gate
+        uses this rather than the last candle close so both units judge drift
+        against the same number.
+        """
+        data = self._get("/fapi/v1/premiumIndex", params={"symbol": symbol.upper()})
+        return float(data.get("markPrice") or 0)
+
     def get_funding_rate(self, symbol: str) -> float:
         """
         Current funding rate for a perpetual (e.g. 0.0001 = 0.01% per 8h).

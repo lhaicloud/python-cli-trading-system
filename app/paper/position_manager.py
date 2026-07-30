@@ -233,11 +233,29 @@ class PositionManager:
         idealized candle-close sig.entry_price; if drift has pushed price past
         the stop or crushed R:R below live_min_rr, skip so the paper record
         forecasts what live would actually take. No-op when the gate is disabled
-        or no current price is available (drift can't be measured)."""
+        or no current price is available (drift can't be measured).
+
+        Measures against the mark price, the same number executor.py reads, not
+        the caller's last candle close. R:R here is hypersensitive — stops are
+        tight enough that 0.1% of price moves it ~15% — so the two sources
+        straddle the floor and disagree: SUIUSDT 2026-07-27 12:00 scored 1.06 on
+        paper's close (0.71580, skipped) and 1.22 on live's mark (0.71643,
+        taken, +$21.57). Falls back to the caller's price if the fetch fails."""
         cfg = get_settings()
         if (not cfg.paper_drift_gate_enabled
                 or current_price is None or current_price <= 0):
             return False
+        try:
+            from app.data.binance_client import BinanceClient
+            with BinanceClient() as client:
+                mark = client.get_mark_price(symbol)
+            if mark > 0:
+                current_price = mark
+        except Exception as exc:
+            logger.debug(
+                "[PM][%s] mark price unavailable (%s) — drift measured off "
+                "candle close %.6f", symbol, exc, current_price,
+            )
         sl_distance = abs(current_price - sig.stop_loss)
         wrong_side = (
             current_price <= sig.stop_loss if sig.signal == "BUY"

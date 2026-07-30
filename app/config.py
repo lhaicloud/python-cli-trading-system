@@ -153,6 +153,21 @@ class Settings(BaseSettings):
     # drift) — seen 4× in a month (HYPE/FET×2/TRX), delaying entries 60-90 min.
     live_margin_buffer: float = Field(0.95, env="LIVE_MARGIN_BUFFER")
 
+    # Minimum fraction of the risk-derived size a live entry must actually get
+    # after the margin clamp. At 1× leverage every open position locks its full
+    # notional, so positions 2-3 of a 3-position book get scraps: XRPUSDT
+    # 2026-07-27 filled $80 notional against a $4,400 intent (1.8%) and its
+    # $46 "risk" resolved to $0.50. Those fills pay full fee + spread to carry
+    # noise-level exposure and pollute the track record, so skip below the
+    # floor rather than book an unreadable result. 0 disables the check.
+    #
+    # 0.25 sits in the empty band of the 14 clamps logged to 2026-07-30: the
+    # unreadable fills cluster at 0.017-0.051 (three trades, +$0.01 realized
+    # between them) and the merely half-sized ones at 0.312-0.950 (+$48.38).
+    # Do not raise this toward 0.5 without re-checking — at 0.5 the same sample
+    # drops 7 of 8 trades and every dollar of the profit.
+    live_min_fill_fraction: float = Field(0.25, env="LIVE_MIN_FILL_FRACTION")
+
     # ── Partial take-profit ───────────────────────────────────────────────────
     partial_tp_enabled:  bool  = Field(True, env="PARTIAL_TP_ENABLED")
     partial_tp_r:        float = Field(1.5,  env="PARTIAL_TP_R")        # trigger at +1.5R
