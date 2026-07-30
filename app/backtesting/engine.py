@@ -486,6 +486,14 @@ def run_backtest(
                         drift_skipped_count += 1
                         progress.advance(task)
                         continue
+                # A market order fills at the market. sig.entry_price is a
+                # zone *level*, and price has already drifted to cur_px by the
+                # time this fires — filling at the level books trades that
+                # never existed (82% of paper's entries to 2026-07-30 sat
+                # outside the candle's traded range). The gate above decides
+                # whether to enter; this decides at what price.
+                if cfg.realistic_entry_fill and cur_px > 0:
+                    entry = cur_px
                 if sig.signal == "BUY":
                     entry *= (1 + slippage_pct)
                 else:

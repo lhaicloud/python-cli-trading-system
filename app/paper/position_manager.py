@@ -225,37 +225,45 @@ class PositionManager:
 
     # ── Submit (limit-or-market) ──────────────────────────────────────────────
 
-    def _entry_drift_blocked(
-        self, symbol: str, sig: "SignalResult", current_price: float | None
-    ) -> bool:
-        """R:R revalidation at the executable price — parity with
-        LiveExecutor.open_trade (executor.py). Paper otherwise fills at the
-        idealized candle-close sig.entry_price; if drift has pushed price past
-        the stop or crushed R:R below live_min_rr, skip so the paper record
-        forecasts what live would actually take. No-op when the gate is disabled
-        or no current price is available (drift can't be measured).
+    def _executable_price(self, symbol: str, fallback: float | None) -> float | None:
+        """The price a market order would actually fill near, right now.
 
-        Measures against the mark price, the same number executor.py reads, not
-        the caller's last candle close. R:R here is hypersensitive — stops are
-        tight enough that 0.1% of price moves it ~15% — so the two sources
-        straddle the floor and disagree: SUIUSDT 2026-07-27 12:00 scored 1.06 on
-        paper's close (0.71580, skipped) and 1.22 on live's mark (0.71643,
-        taken, +$21.57). Falls back to the caller's price if the fetch fails."""
-        cfg = get_settings()
-        if (not cfg.paper_drift_gate_enabled
-                or current_price is None or current_price <= 0):
-            return False
+        The mark price — the same number executor.py reads — not the caller's
+        last candle close. Both the drift gate and the fill itself use this, so
+        resolve it once per submit and hand it to both. Falls back to the
+        caller's price if the fetch fails."""
         try:
             from app.data.binance_client import BinanceClient
             with BinanceClient() as client:
                 mark = client.get_mark_price(symbol)
             if mark > 0:
-                current_price = mark
+                return mark
         except Exception as exc:
             logger.debug(
-                "[PM][%s] mark price unavailable (%s) — drift measured off "
-                "candle close %.6f", symbol, exc, current_price,
+                "[PM][%s] mark price unavailable (%s) — falling back to %s",
+                symbol, exc, fallback,
             )
+        return fallback
+
+    def _entry_drift_blocked(
+        self, symbol: str, sig: "SignalResult", current_price: float | None
+    ) -> bool:
+        """R:R revalidation at the executable price — parity with
+        LiveExecutor.open_trade (executor.py). If drift has pushed price past
+        the stop or crushed R:R below live_min_rr, skip so the paper record
+        forecasts what live would actually take. No-op when the gate is disabled
+        or no current price is available (drift can't be measured).
+
+        Caller must pass an already-resolved executable price (see
+        _executable_price). R:R here is hypersensitive — stops are tight enough
+        that 0.1% of price moves it ~15% — so measuring off the wrong source
+        straddles the floor: SUIUSDT 2026-07-27 12:00 scored 1.06 on paper's
+        candle close (0.71580, skipped) and 1.22 on live's mark (0.71643,
+        taken, +$21.57)."""
+        cfg = get_settings()
+        if (not cfg.paper_drift_gate_enabled
+                or current_price is None or current_price <= 0):
+            return False
         sl_distance = abs(current_price - sig.stop_loss)
         wrong_side = (
             current_price <= sig.stop_loss if sig.signal == "BUY"
@@ -302,23 +310,26 @@ class PositionManager:
         if sig.signal not in ("BUY", "SELL") or sig.entry_price <= 0:
             return "blocked", None
 
-        if not cfg.entry_limit_enabled or current_price is None or current_price <= 0:
-            if self._entry_drift_blocked(symbol, sig, current_price):
+        # Resolve once — the gate and the market fill must agree on the price.
+        exec_price = self._executable_price(symbol, current_price)
+
+        if not cfg.entry_limit_enabled or exec_price is None or exec_price <= 0:
+            if self._entry_drift_blocked(symbol, sig, exec_price):
                 return "blocked", None
-            trade_id = self.open(symbol, sig, capital, signal_id)
+            trade_id = self.open(symbol, sig, capital, signal_id, exec_price)
             return ("opened", trade_id) if trade_id else ("blocked", None)
 
         # Does price still need to retrace to the entry level?
         gap = cfg.entry_limit_min_gap_pct / 100
         needs_retrace = (
-            sig.entry_price < current_price * (1 - gap)
+            sig.entry_price < exec_price * (1 - gap)
             if sig.signal == "BUY"
-            else sig.entry_price > current_price * (1 + gap)
+            else sig.entry_price > exec_price * (1 + gap)
         )
         if not needs_retrace:
-            if self._entry_drift_blocked(symbol, sig, current_price):
+            if self._entry_drift_blocked(symbol, sig, exec_price):
                 return "blocked", None
-            trade_id = self.open(symbol, sig, capital, signal_id)
+            trade_id = self.open(symbol, sig, capital, signal_id, exec_price)
             return ("opened", trade_id) if trade_id else ("blocked", None)
 
         allowed, reason = self.can_open(symbol, sig.signal, sig.entry_price)
@@ -413,16 +424,33 @@ class PositionManager:
         sig: "SignalResult",
         capital: float,
         signal_id: int | None,
+        exec_price: float | None = None,
     ) -> int | None:
         """
         Market entry: apply fill slippage, run guards, insert trade row.
         Returns trade_id or None if blocked.
+
+        exec_price is where a market order would actually fill. A market order
+        fills at the market, not at sig.entry_price — that is a supply/demand
+        *level* derived from prior structure, and price is usually nowhere near
+        it by the time the signal fires. Filling there booked trades that could
+        not have happened: 132 of 161 paper entries to 2026-07-30 (82%) had an
+        entry price outside the high-low range the market actually traded that
+        candle, by 0.98% on average. Those impossible fills scored 75.8% and
+        +$18,186; the 29 obtainable ones scored 20.7% and -$1,142, which is
+        what live independently produced. Falls back to the old behaviour when
+        no executable price is available or realistic_entry_fill is off.
         """
         if sig.signal not in ("BUY", "SELL"):
             return None
 
+        cfg = get_settings()
+        fill_ref = sig.entry_price
+        if cfg.realistic_entry_fill and exec_price is not None and exec_price > 0:
+            fill_ref = exec_price
+
         # Simulated market fill (slippage)
-        filled_entry = simulate_fill(sig.signal, sig.entry_price)
+        filled_entry = simulate_fill(sig.signal, fill_ref)
         sig = dataclasses.replace(sig, entry_price=round(filled_entry, 6))
 
         if sig.entry_price <= 0 or sig.stop_loss <= 0:

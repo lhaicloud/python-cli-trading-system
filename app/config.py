@@ -229,6 +229,21 @@ class Settings(BaseSettings):
     # limit fills at its own price, so the pending-order path is unaffected.
     paper_drift_gate_enabled:   bool  = Field(True, env="PAPER_DRIFT_GATE_ENABLED")
 
+    # ── Realistic entry fills ─────────────────────────────────────────────────
+    # A market entry fills at the market. sig.entry_price is a supply/demand
+    # *level* derived from prior structure, not a price on offer — filling there
+    # books trades that never could have happened. Audit 2026-07-30: 132 of 161
+    # paper entries (82%) had an entry outside the high-low range the market
+    # actually traded that candle, 0.98% outside on average and up to 3.37%.
+    # Those impossible fills returned 75.8% WR / +$18,186; the 29 obtainable
+    # ones returned 20.7% WR / -$1,142 — matching what live produced unaided.
+    # The drift gate (above) decides *whether* to enter; this decides *at what
+    # price*, and without it the gate still books fiction on what it lets past.
+    # Applies to backtest and paper market entries; limit fills already execute
+    # at their own resting price, and live has always used the real fill.
+    # Set 0 only to reproduce pre-2026-07-30 numbers for comparison.
+    realistic_entry_fill:       bool  = Field(True, env="REALISTIC_ENTRY_FILL")
+
     # ── SignalFilter A/B toggles ──────────────────────────────────────────────
     # Both filters were fit on very small samples (16 and ~8 trades, 2026-06-09).
     # A/B matrix 2026-07 (4 variants × 8 symbols, backtest variants filter_ab_*):
