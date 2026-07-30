@@ -336,16 +336,22 @@ class LiveExecutor:
 
             # A position clamped to a sliver of its intended size isn't the trade
             # the signal asked for — it pays full fee and spread to carry
-            # noise-level exposure and then reports as a real result. Skip it.
+            # noise-level exposure and then reports as a real result. Running in
+            # shadow until the log shows that cohort really is worthless; see
+            # live_min_fill_enforce in config.py.
             fill_fraction = position_size / intended_qty if intended_qty > 0 else 0.0
             if cfg.live_min_fill_fraction > 0 and fill_fraction < cfg.live_min_fill_fraction:
                 logger.warning(
-                    "[Executor] %s SKIPPED — margin headroom covers only %.1f%% of the "
-                    "intended size (%.6f of %.6f, floor %.0f%%)",
-                    symbol, fill_fraction * 100, position_size, intended_qty,
+                    "[Executor] %s %s — margin headroom covers only %.1f%% of the "
+                    "intended size (%.6f of %.6f, floor %.0f%%)%s",
+                    symbol,
+                    "SKIPPED" if cfg.live_min_fill_enforce else "WOULD SKIP",
+                    fill_fraction * 100, position_size, intended_qty,
                     cfg.live_min_fill_fraction * 100,
+                    "" if cfg.live_min_fill_enforce else " — SHADOW, entry proceeding",
                 )
-                return "blocked", None
+                if cfg.live_min_fill_enforce:
+                    return "blocked", None
 
             # Risk of the size actually going on, not the sizing intent. The two
             # diverge by up to 90× once the margin clamp and lot rounding bite,

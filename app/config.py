@@ -168,6 +168,16 @@ class Settings(BaseSettings):
     # drops 7 of 8 trades and every dollar of the profit.
     live_min_fill_fraction: float = Field(0.25, env="LIVE_MIN_FILL_FRACTION")
 
+    # Whether the floor above actually blocks, or only reports. DEFAULT OFF:
+    # the 0.25 threshold is fit on 8 clamps, too few to bet entries on, and a
+    # per-symbol A/B would halve that sample again. In shadow mode the guard
+    # logs "WOULD SKIP" and lets the entry through, so each trade it would have
+    # blocked still closes and produces a real outcome — a full-sample paired
+    # dataset at zero opportunity cost. Flip on once the log says the skipped
+    # cohort is genuinely worthless:
+    #     journalctl -u lqmtf-live.service | grep 'WOULD SKIP'
+    live_min_fill_enforce: bool = Field(False, env="LIVE_MIN_FILL_ENFORCE")
+
     # ── Partial take-profit ───────────────────────────────────────────────────
     partial_tp_enabled:  bool  = Field(True, env="PARTIAL_TP_ENABLED")
     partial_tp_r:        float = Field(1.5,  env="PARTIAL_TP_R")        # trigger at +1.5R

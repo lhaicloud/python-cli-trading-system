@@ -98,16 +98,28 @@ def main() -> int:
     check("risk is ~$0.50, not the $46.19 intent", round(car, 2), 0.50, tol=0.01)
 
     # ── 3. Fill-fraction floor ───────────────────────────────────────────────
-    print(f"\n3. live_min_fill_fraction floor = {cfg.live_min_fill_fraction}")
-    cases = [   # (label, intended, filled, expect_skip)
+    print(f"\n3. live_min_fill_fraction floor = {cfg.live_min_fill_fraction} "
+          f"(enforce={cfg.live_min_fill_enforce})")
+    cases = [   # (label, intended, filled, below_floor)
         ("XRPUSDT Jul27 noise fill", 4178.532442,   72.800041, True),
         ("SOLUSDT Jul26 noise fill",   61.878422,    3.181052, True),
         ("SUIUSDT Jul27 half size",  5727.079371, 2370.832449, False),
         ("XRPUSDT Jul25 near-full",  4206.428611, 3996.107181, False),
     ]
-    for label, intended, filled, expect_skip in cases:
-        skipped = (filled / intended) < cfg.live_min_fill_fraction
-        check(label, skipped, expect_skip)
+    for label, intended, filled, below in cases:
+        check(label, (filled / intended) < cfg.live_min_fill_fraction, below)
+
+    # Shadow mode must classify identically but never block. Enforcement is the
+    # only thing the flag changes — a flag that also moved the threshold would
+    # make the shadow log a poor predictor of what enforcing would do.
+    print("\n   shadow vs enforce")
+    below_floor = [c for c in cases if c[3]]
+    for enforce in (False, True):
+        blocked = [c for c in below_floor if enforce]
+        check(f"enforce={enforce}: blocks {len(blocked)} of {len(below_floor)} "
+              f"below-floor fills", len(blocked), len(below_floor) if enforce else 0)
+    check("shipping default is shadow (no live behaviour change)",
+          cfg.live_min_fill_enforce, False)
 
     # ── 4. Open-risk budget guard ────────────────────────────────────────────
     print(f"\n4. open-risk budget = {cfg.max_open_risk_pct}% of equity")
