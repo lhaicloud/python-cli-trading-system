@@ -17,7 +17,9 @@ Commands:
 
 from __future__ import annotations
 
+import json
 import sys
+from pathlib import Path
 from typing import List, Optional
 
 import typer
@@ -37,6 +39,15 @@ console = Console()
 def _init() -> None:
     """Ensure DB is set up before any command runs."""
     run_migrations()
+
+
+def _load_coin_pool() -> list[str] | None:
+    """coin_pool.json's curated list, or None if the file isn't present."""
+    path = Path("coin_pool.json")
+    if not path.exists():
+        return None
+    with open(path) as f:
+        return [s.upper() for s in json.load(f)["pool"]]
 
 
 # ── backfill ──────────────────────────────────────────────────────────────────
@@ -764,6 +775,8 @@ def live(
     _init()
     import sys; sys.path.insert(0, ".")
 
+    coin_pool = _load_coin_pool()
+
     # ── Live execution branch ─────────────────────────────────────────────────
     if live_execution:
         from app.live.live_watcher import LiveTradingWatcher
@@ -812,6 +825,7 @@ def live(
                 validated_only=auto_validated,
                 fallback_symbols=list(symbols),
                 verbose=True,
+                pool=coin_pool,
             )
         else:
             selected = list(symbols)
@@ -824,6 +838,7 @@ def live(
             rescan_every     = rescan_every,
             rescan_n         = rescan_n,
             rescan_validated = rescan_validated,
+            rescan_pool      = coin_pool,
         )
         live_watcher.run()
         return
@@ -854,6 +869,7 @@ def live(
             validated_only=auto_validated,
             fallback_symbols=list(symbols),
             verbose=True,
+            pool=coin_pool,
         )
     else:
         selected = list(symbols)
@@ -871,5 +887,6 @@ def live(
         sync=sync,
         sync_top=sync_top,
         sync_min_volume=sync_min_volume,
+        rescan_pool=coin_pool,
     )
     watcher.run()

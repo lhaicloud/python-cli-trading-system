@@ -264,7 +264,21 @@ class LiveTradingWatcher:
         console.print(f"  [cyan][Rescan] Cycle {self._cycle} — re-scoring universe...[/cyan]")
         try:
             import sys as _sys; _sys.path.insert(0, ".")
-            from scan_universe import select_watchlist
+            from scan_universe import select_watchlist, auto_backtest_new_symbols
+
+            # Close the validation gap for pool symbols that have candle data
+            # but no backtest_runs row for the CURRENT engine version yet —
+            # otherwise validated_only=True can never surface them. Runs in a
+            # daemon thread (5-10 min/symbol) so this rescan isn't blocked;
+            # newly-validated symbols become eligible on the *next* rescan.
+            import threading as _t
+            _t.Thread(
+                target=auto_backtest_new_symbols,
+                kwargs={"pool": self._rescan_pool},
+                name="AutoBacktest",
+                daemon=True,
+            ).start()
+            console.print("  [cyan][Rescan] Auto-backtest started in background.[/cyan]")
 
             new_symbols = select_watchlist(
                 n=self._rescan_n,

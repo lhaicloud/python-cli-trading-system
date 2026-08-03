@@ -235,6 +235,7 @@ def scan_and_rank(
 def auto_backtest_new_symbols(
     months: int = 12,
     max_symbols: int = 0,
+    pool: list[str] | None = None,
 ) -> list[str]:
     """
     Find symbols that have enough candle history but have never been backtested,
@@ -249,6 +250,9 @@ def auto_backtest_new_symbols(
     months      : How many months of history to cover in each backtest (default 12).
     max_symbols : Cap on how many new symbols to backtest per call (0 = no limit).
                   Useful to avoid long startup delays on a large new batch.
+    pool        : Optional whitelist — only consider these symbols. Without it,
+                  every symbol with enough candle history gets backtested, which
+                  includes coins the rotation would never select anyway.
     """
     from app.backtesting.engine import run_backtest
 
@@ -270,6 +274,10 @@ def auto_backtest_new_symbols(
                 ORDER BY symbol
             """, (MIN_30M_CANDLES,)).fetchall()
         ]
+
+    if pool:
+        pool_set = {s.upper() for s in pool}
+        qualified = [s for s in qualified if s in pool_set]
 
     to_test = [s for s in qualified if s not in tested]
     if max_symbols > 0:

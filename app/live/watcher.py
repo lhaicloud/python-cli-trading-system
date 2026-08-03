@@ -309,22 +309,29 @@ class LiveWatcher:
             import sys as _sys; _sys.path.insert(0, ".")
             from scan_universe import select_watchlist, auto_backtest_new_symbols
 
-            # If the watcher was started with --sync, re-sync and kick off
-            # auto-backtests for any new coins in the background.
-            # Backtests run in a daemon thread so the rescan + candle loop
-            # continue unblocked. New symbols join the watchlist on the
-            # *next* rescan once their backtests complete.
+            # If the watcher was started with --sync, re-sync from Binance so
+            # brand-new listings get candle data before every rescan.
             if self._sync:
-                import threading as _t
                 from app.data.universe import sync_universe
                 console.print("  [cyan][Rescan] Syncing universe...[/cyan]")
                 sync_universe(n=self._sync_top, min_volume_usd=self._sync_min_volume)
-                _t.Thread(
-                    target=auto_backtest_new_symbols,
-                    name="AutoBacktest",
-                    daemon=True,
-                ).start()
-                console.print("  [cyan][Rescan] Auto-backtest started in background.[/cyan]")
+
+            # Always try to close the validation gap for pool symbols that
+            # have candle data but no backtest_runs row for the CURRENT engine
+            # version yet — otherwise select_watchlist(validated_only=True)
+            # can never surface them, no matter how well they'd score, until
+            # someone remembers to run scripts.revalidate_pool by hand.
+            # Backtests run in a daemon thread so the rescan + candle loop
+            # continue unblocked. New symbols join the watchlist on the
+            # *next* rescan once their backtests complete.
+            import threading as _t
+            _t.Thread(
+                target=auto_backtest_new_symbols,
+                kwargs={"pool": self._rescan_pool},
+                name="AutoBacktest",
+                daemon=True,
+            ).start()
+            console.print("  [cyan][Rescan] Auto-backtest started in background.[/cyan]")
 
             new_symbols = select_watchlist(
                 n=self._rescan_n,
