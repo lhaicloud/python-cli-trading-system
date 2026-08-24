@@ -527,6 +527,23 @@ class PositionManager:
         if pos_size <= 0:
             return None
 
+        # Risk of the size actually going on, not the sizing intent. A stop
+        # tighter than 1/leverage of price makes position_size() clamp to the
+        # notional cap, and the two diverge badly there (measured: 59% of trades
+        # capped, actual risk averaging 0.67× intent, TRX 0.25×). This figure is
+        # what the open-risk budget, R-multiples and every report downstream
+        # read, so it has to be the real number — same as LiveExecutor does.
+        price_risk  = abs(entry - stop_loss)
+        risk_amount = pos_size * price_risk
+        intended    = equity * (eff_risk_pct / 100) * lev
+        if intended > 0 and risk_amount < intended * 0.9:
+            logger.info(
+                "[PM][%s] Notional cap bit: risk %.2f of intended %.2f (%.0f%%) "
+                "— stop is %.2f%% away at %s× leverage",
+                symbol, risk_amount, intended, 100 * risk_amount / intended,
+                100 * price_risk / entry, lev,
+            )
+
         trade_id = open_paper_trade({
             "symbol":          symbol,
             "signal_id":       signal_id,
@@ -535,11 +552,11 @@ class PositionManager:
             "stop_loss":       round(stop_loss, 6),
             "take_profit":     round(take_profit, 6),
             "position_size":   round(pos_size, 6),
-            "capital_at_risk": round(equity * (eff_risk_pct / 100) * lev, 2),
+            "capital_at_risk": round(risk_amount, 2),
             "risk_reward":     round(rr, 2),
             "open_time":       int(time.time() * 1000),
             "model_version":   model_version,
-            "original_risk":   round(abs(entry - stop_loss), 6),
+            "original_risk":   round(price_risk, 6),
             "leverage":        lev,
         })
 

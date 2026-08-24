@@ -53,6 +53,10 @@ MIN_PROFITABLE_RUNS = 1
 
 MIN_30M_CANDLES = 5_000   # ~3 months of 30m bars
 
+# A symbol that failed validation gets retried after this many days rather
+# than being excluded forever -- market conditions change.
+BACKTEST_RETRY_FAILED_DAYS = 7
+
 
 # ── Core scan function (importable) ──────────────────────────────────────────
 
@@ -256,13 +260,31 @@ def auto_backtest_new_symbols(
     """
     from app.backtesting.engine import run_backtest
 
-    # Symbols already tested by the CURRENT engine version. Coins that were
-    # only validated by the old optimistic engine get re-tested.
+    # Symbols to skip: ones that already PASSED validation under the CURRENT
+    # engine version, or FAILED it recently (within the retry cooldown).
+    # Previously this counted ANY row under the current engine as "tested",
+    # so a symbol that failed once was excluded forever -- e.g. NEAR/UNI
+    # have been stuck failing since 2026-07-27 with no way back into the
+    # pool even though the whole point of running this every rescan is to
+    # give symbols another look as conditions change.
+    retry_cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=BACKTEST_RETRY_FAILED_DAYS)
+    ).strftime("%Y-%m-%d %H:%M:%S")
     with get_conn() as conn:
         tested = {
             r[0] for r in conn.execute(
-                "SELECT DISTINCT symbol FROM backtest_runs WHERE model_version = ?",
-                (ENGINE_VERSION,),
+                """
+                SELECT symbol FROM backtest_runs
+                WHERE model_version = ?
+                GROUP BY symbol
+                HAVING MAX(
+                           CASE WHEN net_profit > ? AND win_rate >= ?
+                                     AND total_trades >= ? THEN 1 ELSE 0 END
+                       ) = 1
+                    OR MAX(created_at) > ?
+                """,
+                (ENGINE_VERSION, cfg.backtest_min_profit, cfg.backtest_min_win_rate,
+                 cfg.backtest_min_trades, retry_cutoff),
             ).fetchall()
         }
         # Symbols with enough candle data to backtest
