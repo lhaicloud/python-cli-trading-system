@@ -1,20 +1,21 @@
 [Unit]
-Description=LQ-MTF Universe Sync (daily backfill + backtest new coins)
+Description=LQ-MTF Universe Sync (daily backfill + pool backtest)
 Documentation=https://github.com/lhaicloud/python-cli-trading-system
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=ubuntu
-Group=ubuntu
-WorkingDirectory=/home/ubuntu/lqmtf
+User=root
+Group=root
+WorkingDirectory=/root/lqmtf
 
-Environment="PATH=/home/ubuntu/lqmtf/venv/bin:/usr/local/bin:/usr/bin:/bin"
-EnvironmentFile=/home/ubuntu/lqmtf/.env
+Environment="PATH=/root/lqmtf/venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/root/lqmtf/.env
 
-ExecStart=/home/ubuntu/lqmtf/venv/bin/python main.py sync-universe --top 50 --min-volume 50000000
+ExecStart=/root/lqmtf/venv/bin/python main.py sync-universe --top 50 --min-volume 50000000 --backtest-pool
 
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=lqmtf-sync
+

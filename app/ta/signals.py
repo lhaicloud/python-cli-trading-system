@@ -20,7 +20,7 @@ import pandas as pd
 
 from app.version import ENGINE_VERSION
 
-from app.config import get_settings, get_settings_for_symbol
+from app.config import get_settings, get_settings_for_symbol, is_simplified_strategy
 from app.models.versioning import get_current_model_path
 from app.ta.indicators import add_indicators
 from app.ta.liquidity import detect_liquidity_levels, detect_sweeps, liquidity_was_swept_below, liquidity_was_swept_above
@@ -135,6 +135,17 @@ def generate_signal(
             f"Run: python main.py backfill --symbol {symbol} --start 2022-01-01"
         )
 
+    if is_simplified_strategy():
+        daily_atr_pct = 0.0
+        if not df_1d.empty and "atr_pct" in df_1d.columns:
+            try:
+                daily_atr_pct = float(df_1d["atr_pct"].iloc[-1])
+            except Exception:
+                daily_atr_pct = 0.0
+        return _generate_simple_signal(
+            symbol, df_4h, df_1h, df_30m, capital, data_quality, daily_atr_pct,
+        )
+
     current_price = float(df_30m["close"].iloc[-1])
 
     # Daily realized volatility (atr%/price) for the volatility quality gate.
@@ -173,6 +184,15 @@ def generate_signal(
         return _blocked(symbol, prefilter, data_quality, reasons, warnings, regime)
     if prefilter.decision == "HOLD":
         return _hold(symbol, prefilter.reason, data_quality, reasons, warnings, regime)
+
+    # Regime must allow the MTF prefilter direction (bullish_trend → BUY only, etc.)
+    wanted = "BUY" if prefilter.direction == "LONG" else "SELL"
+    if wanted not in allowed:
+        return _hold(
+            symbol,
+            f"Regime={regime} disallows {wanted} (allowed={allowed})",
+            data_quality, reasons, warnings, regime,
+        )
 
     # ── 3. 4H directional bias ────────────────────────────────────────────────
     h4_trend = detect_trend_bias(df_4h) if not df_4h.empty else {"bias": "neutral", "details": []}
@@ -246,8 +266,6 @@ def generate_signal(
         _bp = score_buy_setup(symbol, _mf)
         if _bp > 0:
             buy_conf = round(min(100.0, max(0.0, buy_conf + (_bp - 0.5) * _blend)), 1)
-            if _buy_mv_path:
-                _buy_model_version = Path(_buy_mv_path).stem
 
     if _USE_ML_MODEL and sell_conf > 0 and sell_zone and sell_score_result:
         _mf = _build_model_features(h4_bias, h1_conf["status"], sell_score_result,
@@ -255,8 +273,6 @@ def generate_signal(
         _sp = score_sell_setup(symbol, _mf)
         if _sp > 0:
             sell_conf = round(min(100.0, max(0.0, sell_conf + (_sp - 0.5) * _blend)), 1)
-            if _sell_mv_path:
-                _sell_model_version = Path(_sell_mv_path).stem
 
     # ── 11. Signal conflict resolution ───────────────────────────────────────
     min_conf = cfg.min_signal_confidence
@@ -298,6 +314,9 @@ def generate_signal(
             model_version=_buy_model_version,
         )
         result.daily_atr_pct = daily_atr_pct
+        result.long_score = prefilter.long_score
+        result.short_score = prefilter.short_score
+        result.tf_scores = prefilter.tf_scores
         return result
 
     if sell_conf > buy_conf and sell_conf >= min_conf and sell_zone:
@@ -310,6 +329,9 @@ def generate_signal(
             model_version=_sell_model_version,
         )
         result.daily_atr_pct = daily_atr_pct
+        result.long_score = prefilter.long_score
+        result.short_score = prefilter.short_score
+        result.tf_scores = prefilter.tf_scores
         return result
 
     return _hold(symbol, "No qualifying setup found", data_quality, reasons, warnings, regime)
@@ -599,6 +621,7 @@ def _build_buy_signal(
     regime, current_price, capital,
     reasons, warnings, data_quality,
     model_version: str = ENGINE_VERSION,
+    simplified: bool = False,
 ) -> SignalResult:
     entry = sr.get("entry", zone_midpoint(zone))
     sl    = sr.get("sl", zone["zone_bottom"] * 0.999)
@@ -606,15 +629,16 @@ def _build_buy_signal(
     rr    = sr.get("rr_ratio", risk_reward(entry, sl, tp))
 
     cfg = get_settings()
-    if rr < cfg.min_rr_ratio:
-        warnings.append(f"R:R {rr:.1f} below minimum {cfg.min_rr_ratio:.1f}")
+    min_rr = cfg.simple_min_rr_ratio if simplified else cfg.min_rr_ratio
+    if rr < min_rr:
+        warnings.append(f"R:R {rr:.1f} below minimum {min_rr:.1f}")
         return _hold(symbol, f"R:R {rr:.1f} too low for BUY", data_quality, reasons, warnings, regime)
 
-    if pd_location == "premium":
+    if not simplified and pd_location == "premium":
         warnings.append("BUY blocked: price at premium — waiting for discount/equilibrium pullback")
         return _hold(symbol, "BUY at premium zone", data_quality, reasons, warnings, regime)
 
-    if h1_status == "bearish":
+    if not simplified and h1_status == "bearish":
         warnings.append("BUY blocked: 1H structure is actively bearish — directional conflict")
         return _hold(symbol, "1H bearish opposes BUY", data_quality, reasons, warnings, regime)
 
@@ -652,6 +676,7 @@ def _build_sell_signal(
     regime, current_price, capital,
     reasons, warnings, data_quality,
     model_version: str = ENGINE_VERSION,
+    simplified: bool = False,
 ) -> SignalResult:
     entry = sr.get("entry", zone_midpoint(zone))
     sl    = sr.get("sl", zone["zone_top"] * 1.001)
@@ -659,15 +684,16 @@ def _build_sell_signal(
     rr    = sr.get("rr_ratio", risk_reward(entry, sl, tp))
 
     cfg = get_settings()
-    if rr < cfg.min_rr_ratio:
-        warnings.append(f"R:R {rr:.1f} below minimum {cfg.min_rr_ratio:.1f}")
+    min_rr = cfg.simple_min_rr_ratio if simplified else cfg.min_rr_ratio
+    if rr < min_rr:
+        warnings.append(f"R:R {rr:.1f} below minimum {min_rr:.1f}")
         return _hold(symbol, f"R:R {rr:.1f} too low for SELL", data_quality, reasons, warnings, regime)
 
-    if pd_location in ("discount", "deep_discount"):
+    if not simplified and pd_location in ("discount", "deep_discount"):
         warnings.append(f"SELL blocked: price at {pd_location} — waiting for premium/equilibrium")
         return _hold(symbol, f"SELL at {pd_location} zone", data_quality, reasons, warnings, regime)
 
-    if h1_status == "bullish":
+    if not simplified and h1_status == "bullish":
         warnings.append("SELL blocked: 1H structure is actively bullish — directional conflict")
         return _hold(symbol, "1H bullish opposes SELL", data_quality, reasons, warnings, regime)
 
@@ -834,6 +860,166 @@ def _safe_daily_rsi(df_1d: "pd.DataFrame | None") -> float:
         return float(df_1d["rsi_14"].iloc[-1])
     except Exception:
         return 50.0
+
+
+# ── Option B: simplified 4-rule signal path ───────────────────────────────────
+
+_SIMPLE_RATINGS = {"A", "A+"}
+
+
+def _generate_simple_signal(
+    symbol: str,
+    df_4h: pd.DataFrame,
+    df_1h: pd.DataFrame,
+    df_30m: pd.DataFrame,
+    capital: float,
+    data_quality: str,
+    daily_atr_pct: float,
+) -> SignalResult:
+    """
+    Four rules only:
+      1. 4H trend defines direction (no counter-trend)
+      2. A/A+ zone within 1% of price
+      3. Rejection candle enforced in SignalFilter
+      4. R:R >= simple_min_rr_ratio (default 2.0)
+    """
+    cfg = get_settings_for_symbol(symbol)
+    reasons: list[str] = ["[Simple] v6 four-rule path"]
+    warnings: list[str] = []
+    current_price = float(df_30m["close"].iloc[-1])
+
+    h4_trend = detect_trend_bias(df_4h) if not df_4h.empty else {"bias": "neutral", "details": []}
+    h4_bias = h4_trend["bias"]
+    reasons.extend([f"[4H] {d}" for d in h4_trend.get("details", [])])
+
+    if is_bullish_bias(h4_bias):
+        direction = "LONG"
+    elif is_bearish_bias(h4_bias):
+        direction = "SHORT"
+    else:
+        return _hold(symbol, f"4H trend neutral ({h4_bias}) — no direction", data_quality, reasons, warnings)
+
+    h1_struct = detect_structure(df_1h) if not df_1h.empty else {"structure": "undefined", "details": []}
+    h1_trend = detect_trend_bias(df_1h) if not df_1h.empty else {"bias": "neutral", "details": []}
+    h1_conf = _h1_confirmation(h1_struct, h1_trend, df_1h)
+
+    zones_raw = (
+        detect_zones(df_30m, lookback=300, timeframe="30m")
+        + detect_zones(df_4h, lookback=200, timeframe="4h")
+    )
+    liq_levels = detect_liquidity_levels(df_30m)
+    liq_levels = detect_sweeps(df_30m, liq_levels)
+    rng = get_range(df_30m, lookback=100)
+    pd_location = rng["location"]
+    regime = "simple_4h_trend"
+    buf = cfg.simple_zone_buffer_pct
+
+    if direction == "LONG":
+        buy_conf, buy_zone, buy_score_result, buy_sweep, buy_setup = _evaluate_simple_buy(
+            current_price, df_30m, [z for z in zones_raw if z["zone_type"] == "demand"],
+            liq_levels, h4_bias, reasons, buf,
+        )
+        if not buy_zone:
+            return _hold(symbol, "No A/A+ demand zone within 1% of price", data_quality, reasons, warnings, regime)
+        result = _build_buy_signal(
+            symbol, buy_conf, buy_zone, buy_score_result,
+            buy_sweep, buy_setup, pd_location,
+            h4_bias, h4_bias, h1_conf["status"],
+            regime, current_price, capital,
+            reasons, warnings, data_quality,
+            simplified=True,
+        )
+        result.daily_atr_pct = daily_atr_pct
+        return result
+
+    sell_conf, sell_zone, sell_score_result, sell_sweep, sell_setup = _evaluate_simple_sell(
+        current_price, df_30m, [z for z in zones_raw if z["zone_type"] == "supply"],
+        liq_levels, h4_bias, reasons, buf,
+    )
+    if not sell_zone:
+        return _hold(symbol, "No A/A+ supply zone within 1% of price", data_quality, reasons, warnings, regime)
+    result = _build_sell_signal(
+        symbol, sell_conf, sell_zone, sell_score_result,
+        sell_sweep, sell_setup, pd_location,
+        h4_bias, h4_bias, h1_conf["status"],
+        regime, current_price, capital,
+        reasons, warnings, data_quality,
+        simplified=True,
+    )
+    result.daily_atr_pct = daily_atr_pct
+    return result
+
+
+def _evaluate_simple_buy(
+    current_price, df_30m, demand_zones, liq_levels, h4_bias, reasons, buffer_pct,
+):
+    best_zone = None
+    best_score_result = {}
+    best_conf = 0.0
+    swept = False
+    setup = ""
+
+    for zone in demand_zones:
+        if not price_in_zone(current_price, zone, buffer_pct=buffer_pct):
+            continue
+        liq_swept = any(
+            lvl.get("swept") and "low" in lvl["level_type"]
+            for lvl in liq_levels
+        )
+        sr = score_zone(zone, df_30m, h4_bias, h4_bias, liq_swept, False,
+                        source_tf=zone.get("source_tf", "30m"))
+        zone["score"] = sr["score"]
+        zone["rating"] = sr["rating"]
+        if sr["rating"] not in _SIMPLE_RATINGS:
+            continue
+        conf = float(sr["score"])
+        if conf > best_conf:
+            best_conf = conf
+            best_zone = zone
+            best_score_result = sr
+            swept = liq_swept
+            setup = _detect_setup_type_buy(df_30m, liq_levels, zone)
+            reasons.append(
+                f"[Simple] Demand {zone['zone_bottom']:.2f}–{zone['zone_top']:.2f} "
+                f"score={sr['score']:.0f} ({sr['rating']})"
+            )
+    return best_conf, best_zone, best_score_result, swept, setup
+
+
+def _evaluate_simple_sell(
+    current_price, df_30m, supply_zones, liq_levels, h4_bias, reasons, buffer_pct,
+):
+    best_zone = None
+    best_score_result = {}
+    best_conf = 0.0
+    swept = False
+    setup = ""
+
+    for zone in supply_zones:
+        if not price_in_zone(current_price, zone, buffer_pct=buffer_pct):
+            continue
+        liq_swept = any(
+            lvl.get("swept") and "high" in lvl["level_type"]
+            for lvl in liq_levels
+        )
+        sr = score_zone(zone, df_30m, h4_bias, h4_bias, liq_swept, False,
+                        source_tf=zone.get("source_tf", "30m"))
+        zone["score"] = sr["score"]
+        zone["rating"] = sr["rating"]
+        if sr["rating"] not in _SIMPLE_RATINGS:
+            continue
+        conf = float(sr["score"])
+        if conf > best_conf:
+            best_conf = conf
+            best_zone = zone
+            best_score_result = sr
+            swept = liq_swept
+            setup = _detect_setup_type_sell(df_30m, liq_levels, zone)
+            reasons.append(
+                f"[Simple] Supply {zone['zone_bottom']:.2f}–{zone['zone_top']:.2f} "
+                f"score={sr['score']:.0f} ({sr['rating']})"
+            )
+    return best_conf, best_zone, best_score_result, swept, setup
 
 
 # ── HOLD factory ──────────────────────────────────────────────────────────────

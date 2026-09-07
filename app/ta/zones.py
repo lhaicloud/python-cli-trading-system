@@ -20,7 +20,7 @@ def detect_zones(df: pd.DataFrame, lookback: int = 300, timeframe: str = "30m") 
 
     Algorithm:
     1. Find candles where body/ATR > threshold (displacement candles).
-    2. The zone is the consolidation BEFORE the displacement (last 1–4 base candles).
+    2. The zone is the consolidation BEFORE the displacement (last 1???4 base candles).
     3. Discard zones fully mitigated by subsequent price action.
 
     Returns a list of zone dicts (unsorted, unscored), each tagged with source_tf.
@@ -53,7 +53,7 @@ def detect_zones(df: pd.DataFrame, lookback: int = 300, timeframe: str = "30m") 
         disp_time  = _to_ms(df.index[i])
         is_bull    = disp_close > disp_open
 
-        # Base: 1–4 candles immediately before the displacement
+        # Base: 1???4 candles immediately before the displacement
         base_start = max(0, i - 4)
         base       = df.iloc[base_start:i]
         if base.empty:
@@ -71,8 +71,8 @@ def detect_zones(df: pd.DataFrame, lookback: int = 300, timeframe: str = "30m") 
 
         # Discard if price has already closed fully through the zone
         # (past the _MITIGATION_PCT threshold of the zone height)
-        if i + 1 < len(df):
-            subsequent = df.iloc[i + 1:]
+        subsequent = df.iloc[i + 1:] if i + 1 < len(df) else df.iloc[0:0]
+        if not subsequent.empty:
             zone_height = zone_top - zone_bottom
             if is_bull:
                 # Demand fully broken when close drops below zone_bottom - buffer
@@ -85,6 +85,8 @@ def detect_zones(df: pd.DataFrame, lookback: int = 300, timeframe: str = "30m") 
                 if (subsequent["close"] > broken_level).any():
                     continue
 
+        touch_count = _count_zone_touches(subsequent, zone_bottom, zone_top)
+
         zones.append({
             "zone_type":                zone_type,
             "zone_top":                 round(zone_top, 4),
@@ -93,7 +95,7 @@ def detect_zones(df: pd.DataFrame, lookback: int = 300, timeframe: str = "30m") 
             "body_atr_ratio":           round(body / atr, 3),
             "disp_volume":              float(row.get("volume", 0)),
             "base_candles":             len(base),
-            "touch_count":              0,
+            "touch_count":              touch_count,
             "status":                   "active",
             "source_tf":                timeframe,
         })
@@ -106,7 +108,7 @@ def detect_zones(df: pd.DataFrame, lookback: int = 300, timeframe: str = "30m") 
 def price_in_zone(price: float, zone: dict, buffer_pct: float = 0.001) -> bool:
     """Return True if price is within the zone (with optional buffer).
 
-    buffer_pct is relative to the current price — e.g. 0.02 = within 2% of
+    buffer_pct is relative to the current price ??? e.g. 0.02 = within 2% of
     the zone boundary. This is intentionally price-relative so the buffer
     scales with volatility and doesn't depend on zone width, which varies
     wildly between 30-min and daily zones.
@@ -128,7 +130,18 @@ def is_zone_mitigated(zone: dict, df: pd.DataFrame) -> bool:
         return bool((df["close"] > mid).any())
 
 
-# ── Internal helpers ──────────────────────────────────────────────────────────
+# ?????? Internal helpers ??????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
+
+def _count_zone_touches(
+    subsequent: pd.DataFrame, zone_bottom: float, zone_top: float
+) -> int:
+    """Count distinct retests after displacement (close re-enters zone)."""
+    if subsequent.empty:
+        return 0
+    inside = (subsequent["close"] >= zone_bottom) & (subsequent["close"] <= zone_top)
+    prev_inside = inside.shift(1, fill_value=False)
+    return int((inside & ~prev_inside).sum())
+
 
 def _dedup_zones(zones: list[dict]) -> list[dict]:
     """Remove overlapping zones, keeping those with higher body_atr_ratio."""
@@ -154,3 +167,4 @@ def _to_ms(idx) -> int:
     if isinstance(idx, pd.Timestamp):
         return int(idx.timestamp() * 1000)
     return int(idx)
+

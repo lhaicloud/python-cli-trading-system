@@ -1,5 +1,5 @@
 """
-Backtesting engine — candle-by-candle simulation, no lookahead bias.
+Backtesting engine ??? candle-by-candle simulation, no lookahead bias.
 
 Processes historical candles one at a time.  Signal generation runs
 only on data visible up to (but NOT including) the current candle.
@@ -37,7 +37,7 @@ _TF_LOOKBACK = {
     "4h":  500,
     "1h":  500,
     "30m": 500,
-    "12h": 200,   # 200 × 12H ≈ 100 days lookback
+    "12h": 200,   # 200 ?? 12H ??? 100 days lookback
     "1w":  104,   # 104 weeks = 2 years lookback
 }
 
@@ -88,7 +88,7 @@ def run_backtest(
     fee_pct = cfg.backtest_fee_pct / 100
     slippage_pct = cfg.backtest_slippage_pct / 100
 
-    # Load raw candles — all TFs needed for signal generation
+    # Load raw candles ??? all TFs needed for signal generation
     df_1d  = _load(symbol, "1d",  start_ms, end_ms)
     df_12h = _load(symbol, "12h", start_ms, end_ms)
     df_4h  = _load(symbol, "4h",  start_ms, end_ms)
@@ -102,7 +102,7 @@ def run_backtest(
     # Pre-compute indicators on the FULL datasets once.
     # EMA/ATR/RSI are causal (depend only on past data), so slicing a pre-computed
     # series gives the same values as computing from scratch up to that point.
-    # This transforms the loop from O(n²) to O(n), dramatically reducing runtime.
+    # This transforms the loop from O(n??) to O(n), dramatically reducing runtime.
     df_1d  = add_indicators(df_1d)  if not df_1d.empty  else df_1d
     df_12h = add_indicators(df_12h) if not df_12h.empty else df_12h
     df_4h  = add_indicators(df_4h)  if not df_4h.empty  else df_4h
@@ -112,18 +112,18 @@ def run_backtest(
 
     closed_trades: list[dict] = []
     open_trade: OpenTrade | None = None
-    # Simulated resting limit order (entry refinement) — at most one at a time,
+    # Simulated resting limit order (entry refinement) ??? at most one at a time,
     # mirroring the one-open-trade rule.
     pending_order: dict | None = None
     capital = initial_capital
     daily_loss = 0.0
     daily_loss_date = ""
-    # Max 96 candles open (48 hours on 30m TF) — stagnating trades exit at close
+    # Max 96 candles open (48 hours on 30m TF) ??? stagnating trades exit at close
     MAX_TRADE_CANDLES = 96
     # Signal generation cadence (candles). Live evaluates every candle close;
     # default 2 halves runtime at once-per-hour resolution.
     SIGNAL_STEP = max(1, cfg.backtest_signal_step)
-    # Cooldown candles after a stop-loss hit — 20 candles = 10 hours on 30m TF.
+    # Cooldown candles after a stop-loss hit ??? 20 candles = 10 hours on 30m TF.
     SL_COOLDOWN = 20
     sl_cooldown_remaining = 0
     # Zone blacklist: maps price_level (rounded) -> expiry candle index.
@@ -137,7 +137,11 @@ def run_backtest(
     hold_count = 0
     filtered_count = 0
     drift_skipped_count = 0
-    # Same pre-trade quality gate the live watcher runs — without it the
+    reentry_blocked_count = 0
+    # direction -> [(candle_time, stop_loss)] of levels already entered, used
+    # by the zone re-entry guard. In-memory: the sim has no DB to query.
+    recent_levels: dict[str, list] = {"BUY": [], "SELL": []}
+    # Same pre-trade quality gate the live watcher runs ??? without it the
     # backtest trades a different (looser) strategy than live.
     sig_filter = SignalFilter()
 
@@ -166,7 +170,7 @@ def run_backtest(
             # Expire zone blacklist entries
             zone_blacklist = {k: v for k, v in zone_blacklist.items() if v > i}
 
-            # ── Update open trade ───────────────────────────────────────────
+            # ?????? Update open trade ?????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
             if open_trade is not None:
                 high = float(candle["high"])
                 low  = float(candle["low"])
@@ -246,7 +250,7 @@ def run_backtest(
                         open_trade.partial_taken = True
                         open_trade.partial_pnl = p_pnl
 
-                # Max duration exit — close stagnating trade at current close price
+                # Max duration exit ??? close stagnating trade at current close price
                 candles_open = i - open_trade.open_candle_idx
                 if candles_open >= MAX_TRADE_CANDLES and not hit_tp and not hit_sl:
                     hit_sl = True  # treat as a forced exit
@@ -257,7 +261,7 @@ def run_backtest(
 
                 if hit_tp or hit_sl:
                     if hit_tp and hit_sl and not exit_reason_override:
-                        # Both levels inside one candle — assume the level nearer
+                        # Both levels inside one candle ??? assume the level nearer
                         # the candle OPEN was struck first; ties go to the stop.
                         # (The old TP-priority rule was optimistic and inflated
                         # profit factors.)
@@ -274,7 +278,7 @@ def run_backtest(
                         ("ratchet_sl" if open_trade.ratchet_level > 0 else "sl_hit")
                     )
 
-                    # Stop-type exits are market orders — apply adverse slippage.
+                    # Stop-type exits are market orders ??? apply adverse slippage.
                     # TP exits are resting limit orders (no slippage).
                     if exit_reason != "tp_hit":
                         if open_trade.direction == "BUY":
@@ -325,10 +329,10 @@ def run_backtest(
                         sl_cooldown_remaining = SL_COOLDOWN
                     open_trade = None
 
-            # ── Pending limit order: fill or expire ─────────────────────────
+            # ?????? Pending limit order: fill or expire ???????????????????????????????????????????????????????????????????????????
             # Fills are checked from the candle AFTER placement (the signal
             # fired at this candle's open; same-candle fills would be
-            # optimistic). Limit fills execute at the limit price — no
+            # optimistic). Limit fills execute at the limit price ??? no
             # market slippage.
             if pending_order is not None and open_trade is None:
                 if i >= pending_order["expiry_idx"]:
@@ -370,7 +374,7 @@ def run_backtest(
                         progress.advance(task)
                         continue
 
-            # ── SL cooldown gate ────────────────────────────────────────────
+            # ?????? SL cooldown gate ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
             if sl_cooldown_remaining > 0:
                 # A stop-out also cancels any resting order
                 pending_order = None
@@ -378,28 +382,28 @@ def run_backtest(
                 progress.advance(task)
                 continue
 
-            # ── Max daily loss gate ─────────────────────────────────────────
+            # ?????? Max daily loss gate ???????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
             max_daily_loss = -capital * (cfg.default_max_daily_loss_pct / 100)
             if daily_loss <= max_daily_loss:
                 progress.advance(task)
                 continue
 
-            # ── Max daily trades gate ───────────────────────────────────────
+            # ?????? Max daily trades gate ?????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
             if daily_trades >= MAX_DAILY_TRADES:
                 progress.advance(task)
                 continue
 
-            # ── Only one open trade / pending order at a time ───────────────
+            # ?????? Only one open trade / pending order at a time ?????????????????????????????????????????????
             if open_trade is not None or pending_order is not None:
                 progress.advance(task)
                 continue
 
-            # ── Signal step — skip expensive signal generation on odd candles ─
+            # ?????? Signal step ??? skip expensive signal generation on odd candles ???
             if i % SIGNAL_STEP != 0:
                 progress.advance(task)
                 continue
 
-            # ── Build lookahead-safe DataFrames ─────────────────────────────
+            # ?????? Build lookahead-safe DataFrames ???????????????????????????????????????????????????????????????????????????????????????
             # We use data only up to index i (exclusive of current candle)
             hist_30m = df_30m.iloc[:i]
             hist_1h  = _slice_to(df_1h,  candle_time)
@@ -434,7 +438,7 @@ def run_backtest(
                 progress.advance(task)
                 continue
 
-            # Live-parity quality gate — the exact filter pipeline the live
+            # Live-parity quality gate ??? the exact filter pipeline the live
             # watcher applies before opening a trade (zone rating, daily bias,
             # premium/discount, regime, time-of-day, candle rejection, ...).
             passed, _filter_reason = sig_filter.evaluate(
@@ -445,13 +449,7 @@ def run_backtest(
                 progress.advance(task)
                 continue
 
-            # Trap-zone gate: large wicks + high volume = failed breakout conditions.
-            # These signals need much stronger conviction to trade through.
-            if sig.market_regime == "trap_zone" and sig.confidence < 80.0:
-                progress.advance(task)
-                continue
-
-            # ── Limit-or-market entry ───────────────────────────────────────
+            # ?????? Limit-or-market entry ?????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
             # Same rule as PositionManager.submit(): if price still needs to
             # retrace to the signal's entry level, rest a limit there instead
             # of chasing at market.
@@ -466,7 +464,7 @@ def run_backtest(
             # Market entries pay slippage; limit fills execute at the limit
             entry = sig.entry_price
             if not needs_retrace:
-                # Drift gate — parity with PositionManager._entry_drift_blocked
+                # Drift gate ??? parity with PositionManager._entry_drift_blocked
                 # and LiveExecutor.open_trade. sig.entry_price is a candle-close
                 # level; by fill time price has drifted to cur_px. Measure R:R
                 # from cur_px and skip market entries where drift has crushed it
@@ -488,7 +486,7 @@ def run_backtest(
                         continue
                 # A market order fills at the market. sig.entry_price is a
                 # zone *level*, and price has already drifted to cur_px by the
-                # time this fires — filling at the level books trades that
+                # time this fires ??? filling at the level books trades that
                 # never existed (82% of paper's entries to 2026-07-30 sat
                 # outside the candle's traded range). The gate above decides
                 # whether to enter; this decides at what price.
@@ -499,7 +497,7 @@ def run_backtest(
                 else:
                     entry *= (1 - slippage_pct)
 
-            # ── Zone blacklist gate ─────────────────────────────────────────
+            # ?????? Zone blacklist gate ???????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
             entry_zone_key = round(entry / 100) * 100
             if entry_zone_key in zone_blacklist:
                 progress.advance(task)
@@ -521,6 +519,23 @@ def run_backtest(
             if pos_size <= 0 or sig.risk_reward < cfg.min_rr_ratio:
                 progress.advance(task)
                 continue
+
+            # Zone re-entry guard ??? parity with PositionManager.can_open. One
+            # supply/demand level re-firing after its trade closes produced 19
+            # repeated (symbol, entry) groups carrying 58% of paper PnL.
+            if (cfg.zone_reentry_guard_enabled and sig.stop_loss > 0
+                    and cfg.zone_reentry_cooldown_hours > 0):
+                cutoff = candle_time - int(cfg.zone_reentry_cooldown_hours * 3_600_000)
+                tol = cfg.zone_reentry_level_tol_pct / 100
+                recent_levels[sig.signal] = [
+                    (t, s) for (t, s) in recent_levels[sig.signal] if t >= cutoff
+                ]
+                if any(abs(s - sig.stop_loss) / s <= tol
+                       for (t, s) in recent_levels[sig.signal] if s > 0):
+                    reentry_blocked_count += 1
+                    progress.advance(task)
+                    continue
+                recent_levels[sig.signal].append((candle_time, sig.stop_loss))
 
             entry_features = {
                     "signal":           sig.signal,
@@ -624,6 +639,7 @@ def run_backtest(
     metrics["hold_count"] = hold_count
     metrics["filtered_count"] = filtered_count
     metrics["drift_skipped_count"] = drift_skipped_count
+    metrics["reentry_blocked_count"] = reentry_blocked_count
 
     # Persist results
     run_id = save_backtest_run({
@@ -651,7 +667,7 @@ def run_backtest(
     return {"run_id": run_id, "metrics": metrics, "trades": closed_trades}
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ?????? Helpers ?????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 
 def _atr_expansion(df: pd.DataFrame, window: int = 50) -> float:
     """Current ATR / rolling mean ATR over `window` bars. Returns 1.0 if unavailable."""
@@ -759,3 +775,4 @@ def _to_ms(idx) -> int:
 def _tf_ms(tf: str) -> int:
     from app.utils.timeframes import tf_to_ms
     return tf_to_ms(tf)
+

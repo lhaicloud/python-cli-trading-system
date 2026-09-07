@@ -1,10 +1,10 @@
 """
-PositionManager — single owner of all live/paper trade lifecycle.
+PositionManager ??? single owner of all live/paper trade lifecycle.
 
-All state transitions (open → stopped / target_hit / closed) go through
+All state transitions (open ??? stopped / target_hit / closed) go through
 this class. Nothing else writes paper_trades directly in live mode.
 
-Risk model (portfolio-wide, cross-process safe — all guards query the DB):
+Risk model (portfolio-wide, cross-process safe ??? all guards query the DB):
   - sizing reads the unified portfolio equity, not per-symbol silos
   - total open risk capped at cfg.max_open_risk_pct of equity
   - same-direction positions get scaled-down risk (cfg.corr_risk_scale)
@@ -69,7 +69,7 @@ _PORTFOLIO_MAX_STOPS = 3                   # halt ALL new trades after this many
 _TP_BL_MS         =  4 * 60 * 60 * 1000   # zone blacklist duration after TP
 _STOP_BL_MS       = 24 * 60 * 60 * 1000   # zone blacklist duration after stop
 
-# Exit reasons that are market orders in reality — adverse slippage applies
+# Exit reasons that are market orders in reality ??? adverse slippage applies
 _SLIPPED_EXITS = {"stopped", "timeout", "emergency_rotated"}
 
 
@@ -101,7 +101,7 @@ class PositionManager:
         self.max_same_dir  = max_same_dir
         self._lock         = threading.Lock()
 
-    # ── Query ─────────────────────────────────────────────────────────────────
+    # ?????? Query ???????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 
     def open_trades(self, symbol: str) -> list[dict]:
         """All open trades for a single symbol."""
@@ -120,7 +120,7 @@ class PositionManager:
     def pending_orders(self, symbol: str) -> list[dict]:
         return get_pending_orders(symbol)
 
-    # ── Guards ────────────────────────────────────────────────────────────────
+    # ?????? Guards ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 
     def can_open(
         self,
@@ -138,6 +138,9 @@ class PositionManager:
         (caps, breakers, blacklist) still run.
         """
         cfg = get_settings()
+
+        if symbol.upper() in cfg.excluded_symbol_set:
+            return False, f"{symbol} is on the excluded-symbol denylist"
 
         # 1. Per-symbol: max 1 open trade (a pending order also reserves the slot)
         if self.open_trades(symbol):
@@ -171,7 +174,7 @@ class PositionManager:
         max_risk = equity * (cfg.max_open_risk_pct / 100)
         if open_risk >= max_risk:
             return False, (
-                f"Open-risk budget: ${open_risk:,.0f} at risk ≥ "
+                f"Open-risk budget: ${open_risk:,.0f} at risk ??? "
                 f"{cfg.max_open_risk_pct:.1f}% of ${equity:,.0f} equity"
             )
 
@@ -180,7 +183,7 @@ class PositionManager:
         max_daily_loss = equity * (cfg.default_max_daily_loss_pct / 100)
         if daily_pnl <= -max_daily_loss:
             return False, (
-                f"Daily loss breaker: {daily_pnl:,.2f} today ≤ "
+                f"Daily loss breaker: {daily_pnl:,.2f} today ??? "
                 f"-{cfg.default_max_daily_loss_pct:.1f}% of equity"
             )
 
@@ -198,7 +201,7 @@ class PositionManager:
 
         # 7b. Per-symbol risk memory: bench a structurally-broken symbol whose
         # stops cluster over a multi-day window even when spaced too far apart to
-        # trip the intraday cooldowns (RIFUSDT stopped 3× over 7 days). 0 disables.
+        # trip the intraday cooldowns (RIFUSDT stopped 3?? over 7 days). 0 disables.
         if cfg.symbol_bench_max_stops > 0 and cfg.symbol_bench_window_days > 0:
             bench_window_ms = int(cfg.symbol_bench_window_days * 24 * 60 * 60 * 1000)
             bench_stops, _ = get_symbol_risk_stats(symbol, bench_window_ms)
@@ -206,7 +209,7 @@ class PositionManager:
                 return False, (
                     f"{symbol} benched: {bench_stops} stops in last "
                     f"{cfg.symbol_bench_window_days:.0f} d "
-                    f"(≥{cfg.symbol_bench_max_stops})"
+                    f"(???{cfg.symbol_bench_max_stops})"
                 )
 
         # 8. Portfolio circuit breaker: 3+ stops across any symbols in last 8 h
@@ -214,7 +217,7 @@ class PositionManager:
         if portfolio_stops >= _PORTFOLIO_MAX_STOPS:
             return False, (
                 f"Portfolio circuit breaker: {portfolio_stops} stops across all symbols "
-                f"in last 8 h — halting new entries"
+                f"in last 8 h ??? halting new entries"
             )
 
         # 9. Zone blacklist
@@ -223,12 +226,12 @@ class PositionManager:
 
         return True, ""
 
-    # ── Submit (limit-or-market) ──────────────────────────────────────────────
+    # ?????? Submit (limit-or-market) ??????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 
     def _executable_price(self, symbol: str, fallback: float | None) -> float | None:
         """The price a market order would actually fill near, right now.
 
-        The mark price — the same number executor.py reads — not the caller's
+        The mark price ??? the same number executor.py reads ??? not the caller's
         last candle close. Both the drift gate and the fill itself use this, so
         resolve it once per submit and hand it to both. Falls back to the
         caller's price if the fetch fails."""
@@ -240,7 +243,7 @@ class PositionManager:
                 return mark
         except Exception as exc:
             logger.debug(
-                "[PM][%s] mark price unavailable (%s) — falling back to %s",
+                "[PM][%s] mark price unavailable (%s) ??? falling back to %s",
                 symbol, exc, fallback,
             )
         return fallback
@@ -248,15 +251,15 @@ class PositionManager:
     def _entry_drift_blocked(
         self, symbol: str, sig: "SignalResult", current_price: float | None
     ) -> bool:
-        """R:R revalidation at the executable price — parity with
+        """R:R revalidation at the executable price ??? parity with
         LiveExecutor.open_trade (executor.py). If drift has pushed price past
         the stop or crushed R:R below live_min_rr, skip so the paper record
         forecasts what live would actually take. No-op when the gate is disabled
         or no current price is available (drift can't be measured).
 
         Caller must pass an already-resolved executable price (see
-        _executable_price). R:R here is hypersensitive — stops are tight enough
-        that 0.1% of price moves it ~15% — so measuring off the wrong source
+        _executable_price). R:R here is hypersensitive ??? stops are tight enough
+        that 0.1% of price moves it ~15% ??? so measuring off the wrong source
         straddles the floor: SUIUSDT 2026-07-27 12:00 scored 1.06 on paper's
         candle close (0.71580, skipped) and 1.22 on live's mark (0.71643,
         taken, +$21.57)."""
@@ -271,7 +274,7 @@ class PositionManager:
         )
         if sl_distance == 0 or wrong_side:
             logger.info(
-                "[PM][%s] SKIPPED — price %.6f already beyond stop %.6f",
+                "[PM][%s] SKIPPED ??? price %.6f already beyond stop %.6f",
                 symbol, current_price, sig.stop_loss,
             )
             return True
@@ -282,7 +285,7 @@ class PositionManager:
         live_rr = reward / sl_distance
         if live_rr < cfg.live_min_rr:
             logger.info(
-                "[PM][%s] SKIPPED — R:R at price %.6f is %.2f "
+                "[PM][%s] SKIPPED ??? R:R at price %.6f is %.2f "
                 "(signal entry %.6f promised %.2f, floor %.2f)",
                 symbol, current_price, live_rr, sig.entry_price,
                 sig.risk_reward or 0, cfg.live_min_rr,
@@ -302,15 +305,15 @@ class PositionManager:
         Entry point for new signals.
 
         Returns (outcome, id) where outcome is:
-          'opened'  — market entry, id = trade_id
-          'pending' — resting limit placed, id = order_id
-          'blocked' — guards rejected, id = None
+          'opened'  ??? market entry, id = trade_id
+          'pending' ??? resting limit placed, id = order_id
+          'blocked' ??? guards rejected, id = None
         """
         cfg = get_settings()
         if sig.signal not in ("BUY", "SELL") or sig.entry_price <= 0:
             return "blocked", None
 
-        # Resolve once — the gate and the market fill must agree on the price.
+        # Resolve once ??? the gate and the market fill must agree on the price.
         exec_price = self._executable_price(symbol, current_price)
 
         if not cfg.entry_limit_enabled or exec_price is None or exec_price <= 0:
@@ -381,7 +384,7 @@ class PositionManager:
                 if not touched:
                     continue
 
-                # Re-run guards at fill time — cooldowns/caps may have changed
+                # Re-run guards at fill time ??? cooldowns/caps may have changed
                 allowed, reason = self.can_open(
                     symbol, order["direction"], limit,
                     ignore_pending_id=order["id"],
@@ -416,7 +419,7 @@ class PositionManager:
 
         return events
 
-    # ── Open ──────────────────────────────────────────────────────────────────
+    # ?????? Open ??????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 
     def open(
         self,
@@ -431,7 +434,7 @@ class PositionManager:
         Returns trade_id or None if blocked.
 
         exec_price is where a market order would actually fill. A market order
-        fills at the market, not at sig.entry_price — that is a supply/demand
+        fills at the market, not at sig.entry_price ??? that is a supply/demand
         *level* derived from prior structure, and price is usually nowhere near
         it by the time the signal fires. Filling there booked trades that could
         not have happened: 132 of 161 paper entries to 2026-07-30 (82%) had an
@@ -498,7 +501,7 @@ class PositionManager:
             max_leverage=cfg.max_leverage,
         )
 
-        # Risk scales down for each additional same-direction position —
+        # Risk scales down for each additional same-direction position ???
         # concurrent crypto positions are highly correlated.
         same_dir = [
             t for t in self.all_open_trades() if t.get("direction") == direction
@@ -516,7 +519,7 @@ class PositionManager:
         )
         if vol_factor < 1.0:
             logger.info(
-                "[PM][%s] Volatility sizing: daily ATR %.1f%% → risk ×%.2f",
+                "[PM][%s] Volatility sizing: daily ATR %.1f%% ??? risk ??%.2f",
                 symbol, daily_atr_pct, vol_factor,
             )
         eff_risk_pct *= vol_factor
@@ -530,16 +533,16 @@ class PositionManager:
         # Risk of the size actually going on, not the sizing intent. A stop
         # tighter than 1/leverage of price makes position_size() clamp to the
         # notional cap, and the two diverge badly there (measured: 59% of trades
-        # capped, actual risk averaging 0.67× intent, TRX 0.25×). This figure is
+        # capped, actual risk averaging 0.67?? intent, TRX 0.25??). This figure is
         # what the open-risk budget, R-multiples and every report downstream
-        # read, so it has to be the real number — same as LiveExecutor does.
+        # read, so it has to be the real number ??? same as LiveExecutor does.
         price_risk  = abs(entry - stop_loss)
         risk_amount = pos_size * price_risk
         intended    = equity * (eff_risk_pct / 100) * lev
         if intended > 0 and risk_amount < intended * 0.9:
             logger.info(
                 "[PM][%s] Notional cap bit: risk %.2f of intended %.2f (%.0f%%) "
-                "— stop is %.2f%% away at %s× leverage",
+                "??? stop is %.2f%% away at %s?? leverage",
                 symbol, risk_amount, intended, 100 * risk_amount / intended,
                 100 * price_risk / entry, lev,
             )
@@ -562,12 +565,12 @@ class PositionManager:
 
         if trade_id:
             logger.info(
-                "[PM][%s] Opened %s @ %.6f  SL=%.6f  TP=%.6f  lev=%s×  risk=%.2f%%",
+                "[PM][%s] Opened %s @ %.6f  SL=%.6f  TP=%.6f  lev=%s??  risk=%.2f%%",
                 symbol, direction, entry, stop_loss, take_profit, lev, eff_risk_pct,
             )
         return trade_id
 
-    # ── Close ─────────────────────────────────────────────────────────────────
+    # ?????? Close ???????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 
     def close(
         self,
@@ -583,8 +586,8 @@ class PositionManager:
         Always writes close_time; never leaves it null or epoch-2.
 
         The returned dict carries:
-          pnl           — TOTAL trade PnL (incl. any partial TP), stored in DB
-          pnl_increment — PnL realized by THIS close only; callers must apply
+          pnl           ??? TOTAL trade PnL (incl. any partial TP), stored in DB
+          pnl_increment ??? PnL realized by THIS close only; callers must apply
                           this (not pnl) to capital, since partial TP already
                           updated capital when it was taken.
         """
@@ -599,7 +602,7 @@ class PositionManager:
         pos_size  = float(trade["position_size"])
         equity    = get_portfolio_capital()
 
-        # Stop-type exits are market orders in reality — adverse slippage
+        # Stop-type exits are market orders in reality ??? adverse slippage
         if reason in _SLIPPED_EXITS:
             close_price = (
                 close_price * (1 - slippage_pct)
@@ -656,7 +659,7 @@ class PositionManager:
             "status":        reason,
         }
 
-    # ── Price checks ──────────────────────────────────────────────────────────
+    # ?????? Price checks ??????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 
     def check_price(self, symbol: str, price: float) -> list[dict]:
         """
@@ -664,7 +667,7 @@ class PositionManager:
         an intraday poll).  Equivalent to check_candle with high=low=close.
 
         No ATR is available for a bare price tick, so the ratchet trailing
-        stop does not advance here — it only advances on check_candle(),
+        stop does not advance here ??? it only advances on check_candle(),
         which runs once per 30-m candle close with a real ATR reading.
         """
         closed, _ratcheted = self._evaluate(symbol, high=price, low=price, close=price)
@@ -681,13 +684,13 @@ class PositionManager:
         """
         Check open trades against a completed candle.
         Uses high/low for SL/TP detection (catches wicks) and close for
-        MFE/MAE.  If a candle trips both SL and TP, the stop takes priority —
+        MFE/MAE.  If a candle trips both SL and TP, the stop takes priority ???
         intrabar order is unknown from H/L alone, so be conservative.
 
         `atr` (14-period ATR of the same candle) drives the ratchet trailing
         stop; pass it to advance the stop toward breakeven/locked-profit/ATR
         trail as the trade moves through +1R/+2R/+3R/+4R. Returns
-        (closed_trades, ratchet_events) — ratchet_events is a list of
+        (closed_trades, ratchet_events) ??? ratchet_events is a list of
         {"trade", "new_sl", "new_level"} dicts, one per trade whose stop
         tightened to a new level this cycle.
         """
@@ -702,7 +705,7 @@ class PositionManager:
         atr: float | None = None,
     ) -> tuple[list[dict], list[dict]]:
         """
-        Core evaluation loop — thread-safe via lock so the price monitor
+        Core evaluation loop ??? thread-safe via lock so the price monitor
         and the 30-m signal thread cannot double-close the same trade.
         """
         cfg = get_settings()
@@ -727,7 +730,7 @@ class PositionManager:
                 # Ratchet trailing stop: +1R->BE, +2R->lock 0.75R, +3R->lock
                 # 1.5R, +4R+->ATR trail. Only advances on candle closes (atr
                 # is None on bare ticks from check_price). Stop only ever
-                # tightens, never loosens — see app/ta/exit_engine.py.
+                # tightens, never loosens ??? see app/ta/exit_engine.py.
                 if cfg.mtf_ratchet_enabled and atr is not None and risk0 > 0:
                     ratchet_levels = build_ratchet_levels(entry, sl, direction)
                     old_level = int(trade.get("ratchet_level") or 0)
@@ -814,7 +817,7 @@ class PositionManager:
                 new_mfe = max(stored_mfe, curr_mfe)
                 new_mae = max(stored_mae, curr_mae)
 
-                # Stagnation timeout — live parity with the backtest engine
+                # Stagnation timeout ??? live parity with the backtest engine
                 timed_out = (
                     not hit_sl and not hit_tp
                     and now_ms - int(trade["open_time"]) >= max_age_ms
@@ -837,7 +840,7 @@ class PositionManager:
                     )
                     continue
 
-                # Stop takes priority on candles that hit both levels —
+                # Stop takes priority on candles that hit both levels ???
                 # intrabar order is unknown, assume the worse outcome
                 if hit_sl:
                     exit_price = sl
@@ -849,7 +852,7 @@ class PositionManager:
                     reason     = "target_hit"
                     final_mfe  = max(new_mfe, abs(tp - entry))
                     final_mae  = new_mae
-                else:  # timeout — exit at current price
+                else:  # timeout ??? exit at current price
                     exit_price = close
                     reason     = "timeout"
                     final_mfe  = new_mfe
@@ -867,7 +870,7 @@ class PositionManager:
 
         return closed, ratcheted
 
-    # ── Emergency close ───────────────────────────────────────────────────────
+    # ?????? Emergency close ?????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 
     def emergency_close(self, symbol: str, regime: str) -> list[dict]:
         """
@@ -904,7 +907,7 @@ class PositionManager:
         return closed
 
 
-# ── Private helpers ────────────────────────────────────────────────────────────
+# ?????? Private helpers ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 
 class _LeverageSig:
     """Minimal stand-in for SignalResult when sizing a limit fill."""
@@ -953,3 +956,4 @@ def _update_snapshot_outcome(trade_id: int, outcome: str, pnl: float) -> None:
             )
     except Exception as exc:
         logger.warning("[PM] Could not update snapshot outcome for trade %d: %s", trade_id, exc)
+

@@ -1,5 +1,5 @@
 """
-Universe scanner — ranks all symbols in the DB by current signal opportunity.
+Universe scanner ??? ranks all symbols in the DB by current signal opportunity.
 
 Can be used as a standalone CLI tool or imported by the watcher for auto-selection.
 
@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.backtesting.engine import ENGINE_VERSION
+from app.validation import passes_backtest_validation
 from app.config import get_settings
 from app.data.repository import get_candles, get_active_model
 from app.db.connection import get_conn
@@ -58,7 +59,7 @@ MIN_30M_CANDLES = 5_000   # ~3 months of 30m bars
 BACKTEST_RETRY_FAILED_DAYS = 7
 
 
-# ── Core scan function (importable) ──────────────────────────────────────────
+# ?????? Core scan function (importable) ??????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 
 def scan_and_rank(
     validated_only: bool = False,
@@ -73,7 +74,7 @@ def scan_and_rank(
     validated_only : If True, only include symbols with >= MIN_PROFITABLE_RUNS
                      profitable backtest runs from the current engine version.
     verbose        : Print per-symbol status as scanning progresses.
-    pool           : Optional whitelist — only scan these symbols (e.g. the
+    pool           : Optional whitelist ??? only scan these symbols (e.g. the
                      curated rotation pool from coin_pool.json).
 
     Returns
@@ -92,28 +93,42 @@ def scan_and_rank(
             ORDER BY symbol
         """, (MIN_30M_CANDLES,)).fetchall()
 
-        # Backtest run history per symbol — CURRENT engine version only.
+        # Backtest run history per symbol ??? CURRENT engine version only.
         # Runs from the old optimistic engine (rule_based_v1) had inflated
         # profit factors and don't count as validation.
         # A run counts as "profitable" only when it passes all three thresholds:
         # net_profit > min_profit, win_rate >= min_win_rate, total_trades >= min_trades.
         _c = cfg
+        _exp = _c.backtest_expectancy_enabled
         bt_stats = {
             r[0]: {"runs": r[1], "profitable": r[2]}
             for r in conn.execute("""
                 SELECT symbol, COUNT(*) as runs,
-                       SUM(CASE WHEN net_profit > ?
-                                 AND win_rate   >= ?
-                                 AND total_trades >= ?
-                            THEN 1 ELSE 0 END) as profitable
+                       SUM(CASE WHEN (
+                                net_profit > ?
+                            AND win_rate   >= ?
+                            AND total_trades >= ?
+                       ) OR (
+                                ? = 1
+                            AND net_profit >= ?
+                            AND win_rate   >= ?
+                            AND total_trades >= ?
+                            AND profit_factor >= ?
+                       ) THEN 1 ELSE 0 END) as profitable
                 FROM backtest_runs
                 WHERE model_version = ?
                 GROUP BY symbol
-            """, (_c.backtest_min_profit, _c.backtest_min_win_rate,
-                  _c.backtest_min_trades, ENGINE_VERSION)).fetchall()
+            """, (
+                _c.backtest_min_profit, _c.backtest_min_win_rate, _c.backtest_min_trades,
+                1 if _exp else 0,
+                _c.backtest_expectancy_min_profit, _c.backtest_expectancy_min_win_rate,
+                _c.backtest_expectancy_min_trades, _c.backtest_expectancy_min_pf,
+                ENGINE_VERSION,
+            )).fetchall()
         }
 
-    symbols = [r[0] for r in rows]
+    excluded = cfg.excluded_symbol_set
+    symbols = [r[0] for r in rows if r[0] not in excluded]
     if pool:
         pool_set = {s.upper() for s in pool}
         symbols = [s for s in symbols if s in pool_set]
@@ -145,10 +160,10 @@ def scan_and_rank(
             df_12h = add_indicators(df_12h) if not df_12h.empty else df_12h
             df_1w  = add_indicators(df_1w)
 
-            # ── Liquidity + volatility quality gate (prevention at source) ──
+            # ?????? Liquidity + volatility quality gate (prevention at source) ??????
             # Keep RIF-like names off the watchlist: thin coins get noise-swept
             # stops, wild coins can't be governed by a zone stop. Calibrated on
-            # post-deploy trades (every winner ≥ $38M/day & daily atr% ≤ 11.1).
+            # post-deploy trades (every winner ??? $38M/day & daily atr% ??? 11.1).
             avg_qv_musd = 0.0
             if "quote_volume" in df_1d.columns:
                 qv = df_1d["quote_volume"].dropna()
@@ -169,10 +184,10 @@ def scan_and_rank(
             has_buy  = get_active_model(sym, "buy")  is not None
             has_sell = get_active_model(sym, "sell") is not None
             ml_tag   = ("buy+sell" if (has_buy and has_sell)
-                        else ("buy" if has_buy else ("sell" if has_sell else "—")))
+                        else ("buy" if has_buy else ("sell" if has_sell else "???")))
 
             current_price = float(df_30m["close"].iloc[-1])
-            # Zones are computed on the fly (same calls as generate_signal) —
+            # Zones are computed on the fly (same calls as generate_signal) ???
             # the `zones` DB table is never populated, so reading it back
             # made this score component permanently zero.
             all_zones     = (detect_zones(df_30m, lookback=300, timeframe="30m")
@@ -194,7 +209,7 @@ def scan_and_rank(
             # Bonus for having ML models (more reliable signal confidence)
             ml_bonus   = 5 if (has_buy and has_sell) else (2 if (has_buy or has_sell) else 0)
             # Demote (don't hard-exclude) coins whose daily volatility exceeds the
-            # entry gate — they're only tradeable on calmer days, so rank them last.
+            # entry gate ??? they're only tradeable on calmer days, so rank them last.
             vol_penalty = max(0.0, daily_atr_pct - cfg.max_daily_atr_pct) * 2.0
             conv_score = gap * 0.60 + regime_pts * 5 * 0.25 + zone_bonus * 0.15 + ml_bonus - vol_penalty
 
@@ -203,7 +218,7 @@ def scan_and_rank(
             result = {
                 "symbol":          sym,
                 "decision":        pf.decision,
-                "direction":       pf.direction or "—",
+                "direction":       pf.direction or "???",
                 "long_score":      pf.long_score,
                 "short_score":     pf.short_score,
                 "gap":             gap,
@@ -212,7 +227,7 @@ def scan_and_rank(
                 "ml":              ml_tag,
                 "has_model":       has_buy or has_sell,
                 "zone_near":       zone_near,
-                "zone_dist":       f"{nearest_zone_pct:.1f}%" if nearest_zone_pct else "—",
+                "zone_dist":       f"{nearest_zone_pct:.1f}%" if nearest_zone_pct else "???",
                 "price":           current_price,
                 "liq_musd":        round(avg_qv_musd, 1),
                 "daily_atr_pct":   round(daily_atr_pct, 1),
@@ -254,7 +269,7 @@ def auto_backtest_new_symbols(
     months      : How many months of history to cover in each backtest (default 12).
     max_symbols : Cap on how many new symbols to backtest per call (0 = no limit).
                   Useful to avoid long startup delays on a large new batch.
-    pool        : Optional whitelist — only consider these symbols. Without it,
+    pool        : Optional whitelist ??? only consider these symbols. Without it,
                   every symbol with enough candle history gets backtested, which
                   includes coins the rotation would never select anyway.
     """
@@ -271,6 +286,8 @@ def auto_backtest_new_symbols(
         datetime.now(timezone.utc) - timedelta(days=BACKTEST_RETRY_FAILED_DAYS)
     ).strftime("%Y-%m-%d %H:%M:%S")
     with get_conn() as conn:
+        _c = cfg
+        _exp = _c.backtest_expectancy_enabled
         tested = {
             r[0] for r in conn.execute(
                 """
@@ -278,13 +295,24 @@ def auto_backtest_new_symbols(
                 WHERE model_version = ?
                 GROUP BY symbol
                 HAVING MAX(
-                           CASE WHEN net_profit > ? AND win_rate >= ?
-                                     AND total_trades >= ? THEN 1 ELSE 0 END
+                           CASE WHEN (
+                                    net_profit > ? AND win_rate >= ?
+                                        AND total_trades >= ?
+                               ) OR (
+                                    ? = 1 AND net_profit >= ? AND win_rate >= ?
+                                        AND total_trades >= ? AND profit_factor >= ?
+                               ) THEN 1 ELSE 0 END
                        ) = 1
                     OR MAX(created_at) > ?
                 """,
-                (ENGINE_VERSION, cfg.backtest_min_profit, cfg.backtest_min_win_rate,
-                 cfg.backtest_min_trades, retry_cutoff),
+                (
+                    ENGINE_VERSION,
+                    _c.backtest_min_profit, _c.backtest_min_win_rate, _c.backtest_min_trades,
+                    1 if _exp else 0,
+                    _c.backtest_expectancy_min_profit, _c.backtest_expectancy_min_win_rate,
+                    _c.backtest_expectancy_min_trades, _c.backtest_expectancy_min_pf,
+                    retry_cutoff,
+                ),
             ).fetchall()
         }
         # Symbols with enough candle data to backtest
@@ -301,6 +329,8 @@ def auto_backtest_new_symbols(
         pool_set = {s.upper() for s in pool}
         qualified = [s for s in qualified if s in pool_set]
 
+    excluded = cfg.excluded_symbol_set
+    qualified = [s for s in qualified if s not in excluded]
     to_test = [s for s in qualified if s not in tested]
     if max_symbols > 0:
         to_test = to_test[:max_symbols]
@@ -325,18 +355,20 @@ def auto_backtest_new_symbols(
             net_p    = metrics.get("net_profit", 0)
             wr       = metrics.get("win_rate", 0)
             n_trades = metrics.get("total_trades", 0)
-            _c = cfg
-            passed = (
-                net_p  >  _c.backtest_min_profit
-                and wr >= _c.backtest_min_win_rate
-                and n_trades >= _c.backtest_min_trades
+            pf       = metrics.get("profit_factor", 0) or 0
+            passed, tier = passes_backtest_validation(
+                cfg,
+                net_profit=net_p,
+                win_rate=wr,
+                total_trades=n_trades,
+                profit_factor=pf,
             )
-            status = "VALIDATED ✓" if passed else (
+            status = f"VALIDATED ({tier}) ???" if passed else (
                 f"rejected (net={net_p:+.2f} wr={wr:.0%} trades={n_trades})"
             )
             print(
                 f"  [AutoBacktest] {sym}: {n_trades} trades  "
-                f"net={net_p:+.2f}  wr={wr:.0%}  → {status}"
+                f"net={net_p:+.2f}  wr={wr:.0%}  ??? {status}"
             )
             if passed:
                 newly_validated.append(sym)
@@ -344,7 +376,7 @@ def auto_backtest_new_symbols(
             print(f"  [AutoBacktest] {sym} skipped: {exc}")
 
     print(
-        f"  [AutoBacktest] Complete — "
+        f"  [AutoBacktest] Complete ??? "
         f"{len(newly_validated)}/{len(to_test)} new symbols validated."
     )
     return newly_validated
@@ -397,16 +429,22 @@ def select_watchlist(
             selected = [r["symbol"] for r in validated]
         else:
             selected = [r["symbol"] for r in validated[:n]]
-            for r in unvalidated:
-                if len(selected) >= n:
-                    break
-                selected.append(r["symbol"])
-                if verbose:
-                    print(f"  [Scanner] Padded with unvalidated pool coin: {r['symbol']}")
+            if cfg.pool_pad_unvalidated:
+                for r in unvalidated:
+                    if len(selected) >= n:
+                        break
+                    selected.append(r["symbol"])
+                    if verbose:
+                        print(f"  [Scanner] Padded with unvalidated pool coin: {r['symbol']}")
+            elif verbose and len(selected) < n:
+                print(
+                    f"  [Scanner] Only {len(selected)}/{n} validated pool coins "
+                    f"(pool_pad_unvalidated=false ??? not padding)"
+                )
     else:
         ranked = scan_and_rank(validated_only=validated_only, verbose=verbose)
         if n == 0:
-            # Return every symbol that passed the filter — no artificial cap
+            # Return every symbol that passed the filter ??? no artificial cap
             selected = [r["symbol"] for r in ranked]
         else:
             selected = [r["symbol"] for r in ranked[:n]]
@@ -426,7 +464,7 @@ def select_watchlist(
     return selected
 
 
-# ── CLI entry point ───────────────────────────────────────────────────────────
+# ?????? CLI entry point ?????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
 
 if __name__ == "__main__":
     import sys, io, argparse
@@ -444,7 +482,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print(f"\n{'='*80}")
-    print(f"  LQ-MTF Universe Scanner  —  {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}")
+    print(f"  LQ-MTF Universe Scanner  ???  {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}")
     print(f"{'='*80}")
 
     results = scan_and_rank(validated_only=args.validated_only, verbose=True)
@@ -468,7 +506,7 @@ if __name__ == "__main__":
     print(f"  {'-'*3}  {'-'*12} {'-'*9} {'-'*5} {'-'*5}  {'-'*5} {'-'*5}  {'-'*22} {'-'*10}  {'-'*4} {'-'*5} {'-'*9}")
 
     for i, r in enumerate(results, 1):
-        zone_tag = "YES" if r["zone_near"] else "—"
+        zone_tag = "YES" if r["zone_near"] else "???"
         print(
             f"  {i:>3}  {r['symbol']:<12} {r['decision']:<9} {r['direction']:<5}"
             f" {r['gap']:>5.1f}  {r['long_score']:>5.1f} {r['short_score']:>5.1f}"
@@ -477,17 +515,17 @@ if __name__ == "__main__":
         )
 
     print(f"\n{'='*80}")
-    print(f"  SUGGESTED WATCHLIST  (top actionable — gap > 30, validated)")
+    print(f"  SUGGESTED WATCHLIST  (top actionable ??? gap > 30, validated)")
     print(f"{'='*80}")
     actionable = [r for r in results if r["decision"] in ("LONG", "SHORT") and r["gap"] >= 30][:6]
     if actionable:
         cmd = "python main.py live " + " ".join(f"--symbol {r['symbol']}" for r in actionable)
         print(f"\n  {cmd}\n")
         for r in actionable:
-            ml_note = f"ML={r['ml']}" if r["ml"] != "—" else "rule-based only"
+            ml_note = f"ML={r['ml']}" if r["ml"] != "???" else "rule-based only"
             print(f"  {r['symbol']:<12} {r['decision']} gap={r['gap']:.1f}  {r['regime']}  {ml_note}")
     else:
-        print(f"\n  No strongly actionable signals — market-wide HOLD/BLOCKED")
+        print(f"\n  No strongly actionable signals ??? market-wide HOLD/BLOCKED")
         print(f"  Best candidates when zones align:")
         for r in results[:4]:
             print(f"  {r['symbol']:<12} gap={r['gap']:.1f}  {r['regime']}  {r['direction']}")
@@ -495,3 +533,4 @@ if __name__ == "__main__":
     print(f"\n  Total scanned: {len(results)}  |  "
           f"Actionable: {sum(1 for r in results if r['decision'] in ('LONG','SHORT'))}")
     print()
+

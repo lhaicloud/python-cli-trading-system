@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,18 +45,102 @@ class Settings(BaseSettings):
     # Default 1 = spot (no leverage). Set LEVERAGE=5 in .env to enable futures mode.
     max_leverage: int = Field(1, env="LEVERAGE")
     min_rr_ratio: float = 1.8
+
+    # Option B — 4-rule simplified strategy (SIMPLIFIED_STRATEGY=1 → v6_simple engine).
+    simplified_strategy_enabled: bool = Field(False, env="SIMPLIFIED_STRATEGY")
+    simple_min_rr_ratio: float = Field(2.0, env="SIMPLE_MIN_RR_RATIO")
+    simple_zone_buffer_pct: float = Field(0.01, env="SIMPLE_ZONE_BUFFER_PCT")
+
+    @field_validator("simplified_strategy_enabled", mode="before")
+    @classmethod
+    def _parse_simplified_flag(cls, v):
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return v
+
+    # ── Zone stop/target geometry (app/ta/zone_scoring.py) ────────────────────
+    # SL sits this many 30m-ATRs beyond the zone edge; TP this many ATRs from
+    # the zone midpoint. Defaults 0.75 / 4.0 are the values these were
+    # hardcoded at through 2026-07-30.
+    #
+    # These two are coupled and must move together: R:R is roughly
+    # tp_mult / (half_zone_width + sl_mult), so widening the stop alone drops
+    # signals below min_rr_ratio and they are never generated. Widening BOTH
+    # holds R:R ~constant while cutting drift sensitivity — a fixed price move
+    # is a smaller fraction of a wider stop, so the executable-price R:R
+    # re-check in _entry_drift_blocked degrades more slowly. Position size
+    # falls out automatically: math_utils.position_size divides the risk
+    # budget by stop distance, so a wider stop sizes down and dollar risk per
+    # trade is unchanged.
+    zone_sl_atr_mult: float = Field(0.75, env="ZONE_SL_ATR_MULT")
+    zone_tp_atr_mult: float = Field(4.0,  env="ZONE_TP_ATR_MULT")
+
+    # TP is clamped to the high/low of this many 30m candles so trending
+    # markets don't get an unreachable target. Measured 2026-07-31 on
+    # ADA/AVAX/DOT/SUI: at the default 4.0 tp_mult the clamp binds on 17.8%
+    # of bars, but it binds on 35-49% at 8x ATR and 58-73% at 12x. That makes
+    # the lookback load-bearing for any tp_mult comparison -- leaving it at
+    # 300 while widening tp_mult pins the target and widens only the stop,
+    # silently reproducing the sl-only failure mode. Clamp-neutral pairings
+    # (equal bind rate to the 4.0/300 baseline): 6.0->600, 8.0->600,
+    # 12.0->1200.
+    zone_tp_range_lookback: int = Field(300, env="ZONE_TP_RANGE_LOOKBACK")
+
+    # Target basis. "atr" (default, production) sets TP at zone_tp_atr_mult
+    # ATRs from the zone midpoint. "r_multiple" sets it at zone_tp_r_multiple
+    # times the *stop distance*, which fixes R:R by construction no matter how
+    # wide the stop is.
+    #
+    # Why the mode exists: under "atr" the stop and the target are set from
+    # independent formulas, so widening the stop mechanically destroys R:R and
+    # the signal dies at min_rr_ratio. Scaling both ATR multipliers together
+    # does not fix it either -- measured 2026-07-31, tp distance FELL (2.84%
+    # -> 2.11%) when tp_mult went 4.0 -> 6.0, because signals fire at zone
+    # edges near range extremes where the TP range-clamp bites hardest, far
+    # more often than the 17.8% all-bars bind rate suggests. "r_multiple" is
+    # the only basis under which "widen the stop, hold R:R" is expressible.
+    zone_tp_mode:        str   = Field("atr", env="ZONE_TP_MODE")
+    zone_tp_r_multiple:  float = Field(3.0,   env="ZONE_TP_R_MULTIPLE")
+
+    # ── Zone re-entry guard ───────────────────────────────────────────────────
+    # can_open() already caps one OPEN trade per symbol, so duplicates can
+    # never be concurrent -- but nothing stops the same zone level re-firing
+    # once the previous trade closes. Audit 2026-07-31: 19 (symbol, entry)
+    # groups repeated, 51 trades carrying 58% of paper PnL; ADAUSDT opened the
+    # 0.167616 level 6 times in 27h (all 6 target_hit) and TRXUSDT was still
+    # entering one 16-day-old level. Blocks a repeat entry on the same
+    # stop-loss level, same direction, inside the cooldown.
+    zone_reentry_guard_enabled:  bool  = Field(True, env="ZONE_REENTRY_GUARD_ENABLED")
+    zone_reentry_cooldown_hours: float = Field(12.0, env="ZONE_REENTRY_COOLDOWN_HOURS")
+    # Two stops within this % of each other count as the same level.
+    zone_reentry_level_tol_pct:  float = Field(0.10, env="ZONE_REENTRY_LEVEL_TOL_PCT")
+
     min_zone_score: float = 70.0
     min_zone_score_no_model: float = 70.0
     min_signal_confidence: float = 65.0
 
     # Symbols pinned to the baseline (pre-relaxation) gating thresholds
     # regardless of MTF_MIN_SCORE/MIN_ZONE_SCORE/MIN_SIGNAL_CONFIDENCE tuning.
-    # Comma-separated in .env, e.g. STRICT_SYMBOLS=DOGEUSDT,HYPEUSDT
+    # Comma-separated in .env, e.g. STRICT_SYMBOLS=SOLUSDT,XRPUSDT
     strict_symbols: str = Field("", env="STRICT_SYMBOLS")
+
+    # Hard denylist — never rotate in or open new trades on these symbols.
+    # Comma-separated, e.g. EXCLUDED_SYMBOLS=RIFUSDT,HYPEUSDT,NEARUSDT
+    excluded_symbols: str = Field(
+        "RIFUSDT,HYPEUSDT,ENAUSDT,1000PEPEUSDT,NEARUSDT,UNIUSDT,ARBUSDT,"
+        "LTCUSDT,OPUSDT,JUPUSDT,ADAUSDT,AVAXUSDT,BNBUSDT,TRXUSDT,,ONDOUSDT,ORDIUSDT,WIFUSDT"
+        "ETHUSDT,FETUSDT,APTUSDT,BTCUSDT,DOGEUSDT,SOLUSDT,"
+        "INJUSDT,CRVUSDT,FILUSDT,WLDUSDT",
+        env="EXCLUDED_SYMBOLS",
+    )
 
     @property
     def strict_symbol_set(self) -> set[str]:
         return {s.strip().upper() for s in self.strict_symbols.split(",") if s.strip()}
+
+    @property
+    def excluded_symbol_set(self) -> set[str]:
+        return {s.strip().upper() for s in self.excluded_symbols.split(",") if s.strip()}
 
     # Backtest — futures fees (taker 0.05% vs spot 0.10%)
     backtest_fee_pct: float = 0.05
@@ -68,9 +152,21 @@ class Settings(BaseSettings):
     # Backtest validation thresholds — a run must pass ALL THREE to count as
     # "profitable" for the purposes of the validated watchlist.
     # net_profit > 0 alone is not enough (e.g. $0.90 on $10k = noise).
-    backtest_min_win_rate: float = Field(0.45, env="BACKTEST_MIN_WIN_RATE")   # 45%
-    backtest_min_trades:   int   = Field(5,    env="BACKTEST_MIN_TRADES")     # at least 5 trades
-    backtest_min_profit:   float = Field(0.0,  env="BACKTEST_MIN_PROFIT")     # > 0
+    backtest_min_win_rate: float = Field(0.50, env="BACKTEST_MIN_WIN_RATE")   # 50%
+    backtest_min_trades:   int   = Field(8,    env="BACKTEST_MIN_TRADES")     # at least 8 trades
+    backtest_min_profit:   float = Field(100.0, env="BACKTEST_MIN_PROFIT")   # ≥ $100 net
+
+    # Alternate validation for positive-expectancy / lower-WR systems (zone + R:R).
+    # Still excludes losers; requires larger sample + profit + PF.
+    backtest_expectancy_enabled:    bool  = Field(True,  env="BACKTEST_EXPECTANCY_ENABLED")
+    backtest_expectancy_min_win_rate: float = Field(0.39, env="BACKTEST_EXPECTANCY_MIN_WIN_RATE")
+    backtest_expectancy_min_trades:   int   = Field(20,   env="BACKTEST_EXPECTANCY_MIN_TRADES")
+    backtest_expectancy_min_profit:   float = Field(400.0, env="BACKTEST_EXPECTANCY_MIN_PROFIT")
+    backtest_expectancy_min_pf:       float = Field(1.30, env="BACKTEST_EXPECTANCY_MIN_PF")
+
+    # When True, pad the watchlist with unvalidated pool coins if fewer than N
+    # pass validation. Default off — unvalidated padding let RIF/HYPE into rotation.
+    pool_pad_unvalidated: bool = Field(False, env="POOL_PAD_UNVALIDATED")
 
     # Telegram notifications (paper)
     telegram_bot_token: str = ""
@@ -257,6 +353,10 @@ class Settings(BaseSettings):
     # (PF collapsed to ~1.1 without it). Comma-separated, like STRICT_SYMBOLS.
     filter_distribution_symbols: str = Field("", env="FILTER_DISTRIBUTION_SYMBOLS")
 
+    # Trap-zone regime: large wicks + high volume = failed-breakout conditions.
+    # Require higher confidence than normal before trading through (backtest parity).
+    trap_zone_min_confidence: float = Field(80.0, env="TRAP_ZONE_MIN_CONFIDENCE")
+
     @property
     def filter_distribution_symbol_set(self) -> set[str]:
         return {s.strip().upper() for s in self.filter_distribution_symbols.split(",") if s.strip()}
@@ -283,8 +383,10 @@ class Settings(BaseSettings):
 
     # ── Liquidity quality gate (coin selection) ───────────────────────────────
     # Exclude / demote coins whose avg daily quote-volume (USDT) is below this
-    # floor. RIF traded ~$26M/day; every winner ≥ $38M/day. $30M splits them.
-    min_daily_quote_volume_musd: float = Field(30.0, env="MIN_DAILY_QUOTE_VOLUME_MUSD")
+    # floor. RIF traded ~$26M/day; every winner ≥ $38M/day. $25M keeps RIF out
+    # (also on EXCLUDED_SYMBOLS) while letting validated majors (DOT/APT/FET
+    # ~$27-30M) through.
+    min_daily_quote_volume_musd: float = Field(25.0, env="MIN_DAILY_QUOTE_VOLUME_MUSD")
 
     # ── Per-symbol risk memory (backstop) ─────────────────────────────────────
     # Bench a symbol after this many stops over a rolling window — generalises
@@ -307,6 +409,15 @@ class Settings(BaseSettings):
 
 
 _settings: Settings | None = None
+
+
+def is_simplified_strategy() -> bool:
+    """True when Option B four-rule mode is active (env or settings)."""
+    import os
+
+    if os.environ.get("SIMPLIFIED_STRATEGY", "").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    return get_settings().simplified_strategy_enabled
 
 
 def get_settings() -> Settings:
