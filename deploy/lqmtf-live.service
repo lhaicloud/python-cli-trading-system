@@ -13,6 +13,14 @@ WorkingDirectory=/root/lqmtf
 Environment="PATH=/root/lqmtf/venv/bin:/usr/local/bin:/usr/bin:/bin"
 EnvironmentFile=/root/lqmtf/.env
 
+# SAFETY: --yes only skips the TTY confirm. It does NOT satisfy
+# OWNER_AUTHORIZATION or RISK_APPROVED. Do not set those true in this unit.
+# HALT NEW TRADING remains policy. Optional extra halt (does not enable live):
+#   Environment=LIVE_HALT=true
+# Optional: remove --yes so a missing TTY cannot skip confirm; systemd
+# still cannot answer typer.confirm, so a headless start without Owner/Risk
+# is denied by app/live/live_entry_auth.py regardless of --yes.
+
 ExecStart=/root/lqmtf/venv/bin/python main.py live \
     --auto \
     --rescan-every 144 \

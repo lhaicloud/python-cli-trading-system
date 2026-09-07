@@ -36,6 +36,7 @@ from app.data.repository import (
 )
 from app.live.exchange import BinanceExchangeClient
 from app.live.executor import LiveExecutor
+from app.live.live_entry_auth import LiveEntryDenied, evaluate_live_entry_from_env
 from app.live.live_notifications import (
     live_notify_error,
     live_notify_signal,
@@ -79,6 +80,7 @@ class LiveTradingWatcher:
     rescan_n         : Symbols to pick on rescan
     rescan_validated : Only include validated symbols on rescan
     rescan_pool      : Optional override pool for universe scanner
+    yes_flag         : CLI `--yes` only skips TTY confirm; never an auth credential
     """
 
     def __init__(
@@ -93,11 +95,13 @@ class LiveTradingWatcher:
         rescan_validated: bool  = True,
         rescan_pool:      list[str] | None = None,
         rotation_history_file: str | None = None,
+        yes_flag:         bool  = False,
     ) -> None:
         cfg = get_settings()
         self.exec_tf           = exec_timeframe
         self.heartbeat_every   = heartbeat_every
         self.dry_run           = dry_run
+        self._yes_flag         = bool(yes_flag)
         self._stop             = False
         self._stop_event       = stop_event
         self._cycle            = 0
@@ -110,6 +114,16 @@ class LiveTradingWatcher:
         self._rotation_history_file = rotation_history_file
         self._last_digest_date = time.strftime("%Y-%m-%d", time.gmtime())
 
+        # Fail-closed before any exchange client is constructed. dry_run is
+        # allowed to start without Owner/Risk (it never calls open_trade);
+        # LiveExecutor still gates any accidental place_*.
+        if not dry_run:
+            auth = evaluate_live_entry_from_env(
+                yes_flag=self._yes_flag, live_execution=True,
+            )
+            if not auth.allowed:
+                raise LiveEntryDenied(auth)
+
         # Exchange client
         self._client = BinanceExchangeClient(
             api_key    = cfg.binance_api_key,
@@ -121,7 +135,9 @@ class LiveTradingWatcher:
         self._lock = threading.Lock()
 
         # Executor + UDS
-        self._executor = LiveExecutor(client=self._client, lock=self._lock)
+        self._executor = LiveExecutor(
+            client=self._client, lock=self._lock, yes_flag=self._yes_flag,
+        )
         self._uds      = UserDataStream(
             client   = self._client,
             executor = self._executor,

@@ -197,6 +197,49 @@ class Settings(BaseSettings):
     live_telegram_token:   str = Field("", env="LIVE_TELEGRAM_TOKEN")
     live_telegram_chat_id: str = Field("", env="LIVE_TELEGRAM_CHAT_ID")
 
+    # ── Live entry fail-closed gates (capital protection; does NOT enable live) ─
+    # New live entries require LIVE_HALT false/absent AND a valid
+    # OWNER_AUTHORIZATION AND a valid RISK_APPROVED. Defaults deny.
+    # `--yes` / `--live-execution` never satisfy these. Do not set the
+    # authorization fields true in systemd unit files.
+    live_halt: bool = Field(False, env="LIVE_HALT")
+    owner_authorization: str = Field("", env="OWNER_AUTHORIZATION")
+    risk_approved: str = Field("", env="RISK_APPROVED")
+    trade_intent_id: str = Field("", env="TRADE_INTENT_ID")
+    owner_authorization_expires: str = Field("", env="OWNER_AUTHORIZATION_EXPIRES")
+    risk_approved_expires: str = Field("", env="RISK_APPROVED_EXPIRES")
+
+    # Opt-in lookup of joblib files under {MODEL_DIR}/{MODEL_DIR.name}/.
+    # DEFAULT OFF: turning this on can suddenly load previously-missing
+    # active models (ML scores stop being 0.0). Forward-only path fix
+    # lives in app.models.versioning; do not bulk-relocate old files.
+    model_path_fallback_nested: bool = Field(False, env="MODEL_PATH_FALLBACK_NESTED")
+
+    @field_validator("live_halt", mode="before")
+    @classmethod
+    def _parse_live_halt(cls, v):
+        # Unrecognised non-empty values fail closed (halt). Empty/absent → False.
+        if v is None or v is False:
+            return False
+        if v is True:
+            return True
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in ("", "0", "false", "no", "off"):
+                return False
+            if s in ("1", "true", "yes", "on"):
+                return True
+            return True
+        return bool(v)
+
+    @field_validator("model_path_fallback_nested", mode="before")
+    @classmethod
+    def _parse_model_path_fallback(cls, v):
+        # Unknown/empty → False so this cannot accidentally enable ML.
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return v
+
     # Supported timeframes in ascending order
     supported_timeframes: list[str] = ["1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d", "1w"]
 
