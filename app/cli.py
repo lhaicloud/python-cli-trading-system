@@ -761,8 +761,8 @@ def live(
     rescan_every: int = typer.Option(144, "--rescan-every", help="Re-run universe scanner every N cycles to rotate coins mid-session (0=off, 144=every 3 days on 30m tf). Symbols with open trades are pinned until the trade closes."),
     rescan_n: int = typer.Option(0, "--rescan-n", help="Symbols to select on each rescan (0 = all validated, default)"),
     rescan_validated: bool = typer.Option(True, "--rescan-validated/--rescan-all", help="Rescan from validated symbols only (default: validated only)"),
-    live_execution: bool = typer.Option(False, "--live-execution", help="Execute real orders on Binance Futures (requires BINANCE_API_KEY/SECRET in .env)"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt (for nohup/background use)"),
+    live_execution: bool = typer.Option(False, "--live-execution", help="Execute real orders on Binance Futures (requires BINANCE_API_KEY/SECRET in .env). Does NOT satisfy Owner/Risk live-entry gates."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt (for nohup/background use). Does NOT satisfy Owner/Risk live-entry gates."),
 ) -> None:
     """
     Run the live auto-signal watcher (single or multi-symbol).
@@ -794,8 +794,22 @@ def live(
 
     # ?????? Live execution branch ???????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
     if live_execution:
+        from app.live.live_entry_auth import evaluate_live_entry_from_env
         from app.live.live_watcher import LiveTradingWatcher
         from app.config import get_settings as _cfg
+
+        # Fail-closed Owner/Risk/LIVE_HALT gates. --yes and --live-execution
+        # never satisfy them. Paper path (the else branch below) is unchanged.
+        if not dry_run:
+            _auth = evaluate_live_entry_from_env(
+                yes_flag=yes, live_execution=True,
+            )
+            if not _auth.allowed:
+                console.print(
+                    f"[bold red]ERROR[/bold red] Live entry denied "
+                    f"({_auth.deny_code}): {_auth.reason}"
+                )
+                raise typer.Exit(1)
 
         cfg = _cfg()
         if not cfg.binance_api_key or not cfg.binance_api_secret:
@@ -854,6 +868,7 @@ def live(
             rescan_n         = rescan_n,
             rescan_validated = rescan_validated,
             rescan_pool      = coin_pool,
+            yes_flag         = yes,
         )
         live_watcher.run()
         return
