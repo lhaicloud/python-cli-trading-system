@@ -43,6 +43,10 @@ _WEIGHTS: dict[str, int] = {
 }
 
 
+class SymbolMetadataError(RuntimeError):
+    """Required Binance contract metadata is missing or invalid."""
+
+
 class BinanceExchangeClient:
     """Authenticated Binance Futures REST client."""
 
@@ -52,7 +56,8 @@ class BinanceExchangeClient:
         self._base       = _TESTNET_REST if testnet else _LIVE_REST
         self._testnet    = testnet
         self._http       = httpx.Client(timeout=15)
-        # symbol → {"lot_step": float, "tick_size": float}
+        # symbol → validated precision metadata. There are deliberately no
+        # guessed precision defaults: missing exchange metadata must fail closed.
         self._sym_info: dict[str, dict[str, float]] = {}
         self._load_symbol_info()
 
@@ -113,47 +118,82 @@ class BinanceExchangeClient:
             raise
 
     def _load_symbol_info(self) -> None:
-        """Fetch LOT_SIZE and PRICE_FILTER for all symbols once at startup."""
+        """Fetch required LOT_SIZE and PRICE_FILTER metadata at startup.
+
+        Failure is fatal for the exchange client. Running live with guessed
+        quantity/price precision is more dangerous than refusing new orders.
+        """
         try:
             data = self._request("GET", "/fapi/v1/exchangeInfo", signed=False)
-            for sym in data.get("symbols", []):
-                symbol = sym["symbol"]
+            symbols = data.get("symbols")
+            if not isinstance(symbols, list) or not symbols:
+                raise SymbolMetadataError("exchangeInfo returned no symbols")
+
+            parsed: dict[str, dict[str, float]] = {}
+            for sym in symbols:
+                symbol = str(sym.get("symbol", "")).upper()
+                if not symbol:
+                    continue
                 lot_step = tick_size = None
                 for f in sym.get("filters", []):
-                    if f["filterType"] == "LOT_SIZE":
+                    if f.get("filterType") == "LOT_SIZE":
                         lot_step = float(f["stepSize"])
-                    elif f["filterType"] == "PRICE_FILTER":
+                    elif f.get("filterType") == "PRICE_FILTER":
                         tick_size = float(f["tickSize"])
-                if lot_step and tick_size:
-                    self._sym_info[symbol] = {
+                if lot_step is not None and tick_size is not None and lot_step > 0 and tick_size > 0:
+                    parsed[symbol] = {
                         "lot_step":  lot_step,
                         "tick_size": tick_size,
                     }
+
+            if not parsed:
+                raise SymbolMetadataError("exchangeInfo contained no valid precision metadata")
+            self._sym_info = parsed
             logger.info("[Exchange] Symbol info cached for %d symbols", len(self._sym_info))
         except Exception as exc:
             logger.error("[Exchange] Failed to load symbol info: %s", exc)
+            if isinstance(exc, SymbolMetadataError):
+                raise
+            raise SymbolMetadataError("failed to load Binance symbol metadata") from exc
+
+    def _metadata_for(self, symbol: str) -> dict[str, float]:
+        key = symbol.upper()
+        metadata = self._sym_info.get(key)
+        if metadata is None:
+            raise SymbolMetadataError(f"{key}: required Binance precision metadata is unavailable")
+        step = float(metadata.get("lot_step", 0) or 0)
+        tick = float(metadata.get("tick_size", 0) or 0)
+        if step <= 0 or tick <= 0:
+            raise SymbolMetadataError(f"{key}: invalid Binance precision metadata")
+        return metadata
 
     def _step_for(self, symbol: str) -> float:
-        return self._sym_info.get(symbol, {}).get("lot_step", 0.001)
+        return float(self._metadata_for(symbol)["lot_step"])
 
     def _tick_for(self, symbol: str) -> float:
-        return self._sym_info.get(symbol, {}).get("tick_size", 0.01)
+        return float(self._metadata_for(symbol)["tick_size"])
 
     # ── Precision helpers ─────────────────────────────────────────────────────
 
     def round_qty(self, symbol: str, qty: float) -> float:
         step = self._step_for(symbol)
         if step <= 0:
-            return qty
+            raise SymbolMetadataError(f"{symbol.upper()}: non-positive quantity step")
         precision = max(0, -int(math.floor(math.log10(step))))
-        return round(math.floor(qty / step) * step, precision)
+        rounded = round(math.floor(qty / step) * step, precision)
+        if rounded <= 0:
+            raise ValueError(f"{symbol.upper()}: quantity rounds to zero")
+        return rounded
 
     def round_price(self, symbol: str, price: float) -> float:
         tick = self._tick_for(symbol)
         if tick <= 0:
-            return price
+            raise SymbolMetadataError(f"{symbol.upper()}: non-positive price tick")
         precision = max(0, -int(math.floor(math.log10(tick))))
-        return round(round(price / tick) * tick, precision)
+        rounded = round(round(price / tick) * tick, precision)
+        if rounded <= 0:
+            raise ValueError(f"{symbol.upper()}: price rounds to non-positive value")
+        return rounded
 
     # ── Account ───────────────────────────────────────────────────────────────
 
@@ -224,6 +264,8 @@ class BinanceExchangeClient:
         reduce_only=True exempts the order from the min-notional filter, so
         even dust-sized position remainders can be closed.
         """
+        # Missing precision metadata must be detected before any order request.
+        self._metadata_for(symbol)
         params = {
             "symbol":   symbol,
             "side":     side,       # BUY or SELL
@@ -244,6 +286,7 @@ class BinanceExchangeClient:
         reduce_only: bool = False,
     ) -> dict:
         """Place a GTC limit order. Returns the order response (includes orderId)."""
+        self._metadata_for(symbol)
         params = {
             "symbol":      symbol,
             "side":        side,       # BUY or SELL
@@ -269,6 +312,7 @@ class BinanceExchangeClient:
         quantity: float,
     ) -> dict:
         """Place a STOP_MARKET conditional order via the Algo Order API (reduceOnly=True)."""
+        self._metadata_for(symbol)
         params = {
             "algoType":         "CONDITIONAL",
             "symbol":           symbol,
@@ -294,6 +338,7 @@ class BinanceExchangeClient:
         quantity: float,
     ) -> dict:
         """Place a TAKE_PROFIT_MARKET conditional order via the Algo Order API (reduceOnly=True)."""
+        self._metadata_for(symbol)
         params = {
             "algoType":    "CONDITIONAL",
             "symbol":      symbol,
