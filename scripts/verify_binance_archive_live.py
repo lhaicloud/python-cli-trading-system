@@ -8,6 +8,7 @@ SHA-256 CHECKSUM before parsing.
 
 from __future__ import annotations
 
+from app.research.archive_parsers import parse_signed_kline_bars
 from app.research.binance_archive import (
     ArchiveDataset,
     archive_url,
@@ -22,7 +23,11 @@ from app.research.binance_archive import (
 def fetch_bars(dataset: ArchiveDataset, symbol: str, period: str = "2026-08-31"):
     url = archive_url(dataset, symbol, period, interval="1h", cadence="daily")
     archive = download_verified_archive(url, max_uncompressed_bytes=64 * 1024 * 1024)
-    bars = parse_kline_bars(archive)
+    bars = (
+        parse_signed_kline_bars(archive)
+        if dataset is ArchiveDataset.PREMIUM_INDEX
+        else parse_kline_bars(archive)
+    )
     continuity = continuity_report(bars, 3_600_000)
     if len(bars) < 20:
         raise RuntimeError(f"{dataset.value} {symbol}: unexpectedly few 1h bars ({len(bars)})")
