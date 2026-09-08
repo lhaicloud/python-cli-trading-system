@@ -139,15 +139,33 @@ def attach_mark_prices(
     funding: Iterable[FundingEvent],
     mark_bars: Iterable[MarketBar],
 ) -> tuple[FundingEvent, ...]:
-    """Attach the latest mark bar price known at each funding timestamp."""
+    """Attach a mark price observable no later than each funding timestamp.
+
+    If a mark candle starts exactly at the funding timestamp, only that candle's
+    OPEN is observable at that instant. Otherwise the most recent fully closed
+    mark candle is used. A still-forming candle close is never consumed.
+    """
     marks = sorted(mark_bars, key=lambda b: b.open_time)
     events = sorted(funding, key=lambda f: f.timestamp)
     out: list[FundingEvent] = []
-    mark_idx = -1
+    next_idx = 0
+    last_closed: MarketBar | None = None
+
     for event in events:
-        while mark_idx + 1 < len(marks) and marks[mark_idx + 1].open_time <= event.timestamp:
-            mark_idx += 1
-        if mark_idx < 0 or marks[mark_idx].close_time < event.timestamp - 3_600_000:
-            raise ArchiveError(f"no fresh mark price for funding event {event.timestamp}")
-        out.append(FundingEvent(event.timestamp, event.rate, marks[mark_idx].close))
+        while next_idx < len(marks) and marks[next_idx].close_time <= event.timestamp:
+            last_closed = marks[next_idx]
+            next_idx += 1
+
+        exact_open: MarketBar | None = None
+        if next_idx < len(marks) and marks[next_idx].open_time == event.timestamp:
+            exact_open = marks[next_idx]
+
+        if exact_open is not None:
+            mark_price = exact_open.open
+        elif last_closed is not None and event.timestamp - last_closed.close_time <= 3_600_000:
+            mark_price = last_closed.close
+        else:
+            raise ArchiveError(f"no fresh observable mark price for funding event {event.timestamp}")
+
+        out.append(FundingEvent(event.timestamp, event.rate, mark_price))
     return tuple(out)
