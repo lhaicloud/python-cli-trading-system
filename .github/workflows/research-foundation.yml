@@ -72,3 +72,31 @@ jobs:
 
       - name: Verify real Binance Vision archives
         run: python -m scripts.verify_binance_archive_live
+
+  preliminary-research:
+    needs: binance-archive-integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Run preliminary real-data multi-asset research
+        run: python -m scripts.run_preliminary_binance_research
+
+      - name: Upload research evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: preliminary-binance-research
+          path: research-output/preliminary-research.json
+          if-no-files-found: error
+          retention-days: 30
