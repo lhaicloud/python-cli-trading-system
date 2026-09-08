@@ -1,0 +1,42 @@
+name: Research Foundation Verification
+
+on:
+  push:
+    branches:
+      - research/multi-asset-perpetual-system
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Verify multi-asset data foundation
+        run: python -m scripts.verify_multi_asset_foundation
+
+      - name: Verify research storage and backfill
+        run: python -m scripts.verify_research_storage
+
+      - name: Verify research governance
+        run: python -m scripts.verify_research_governance
+
+      - name: Verify strict research backtester
+        run: python -m scripts.verify_research_backtester
