@@ -40,3 +40,6 @@ jobs:
 
       - name: Verify strict research backtester
         run: python -m scripts.verify_research_backtester
+
+      - name: Verify historical quote safety
+        run: python -m scripts.verify_research_quote_safety
