@@ -42,6 +42,12 @@ class StrategyEvidence:
     parameter_neighborhood_stable: bool
     entry_delay_robust: bool
     slippage_robust: bool
+    # Fail-closed research evidence gates. Defaults are deliberately False so
+    # a caller cannot promote a strategy merely by omitting data provenance.
+    market_data_integrity_passed: bool = False
+    execution_cost_evidence_verified: bool = False
+    structural_breaks_handled: bool = False
+    asset_class_model_verified: bool = False
     shadow_days: int = 0
     shadow_expectancy: float | None = None
 
@@ -73,7 +79,30 @@ def evaluate_promotion(
     concentration = profit_concentration(evidence.symbol_profit)
     majority_positive = majority_symbols_positive(evidence.symbol_expectancy)
 
-    gates = (
+    evidence_gates = (
+        GateResult(
+            "market_data_integrity",
+            evidence.market_data_integrity_passed,
+            f"verified={evidence.market_data_integrity_passed}",
+        ),
+        GateResult(
+            "execution_cost_evidence",
+            evidence.execution_cost_evidence_verified,
+            f"verified={evidence.execution_cost_evidence_verified}",
+        ),
+        GateResult(
+            "structural_break_handling",
+            evidence.structural_breaks_handled,
+            f"handled={evidence.structural_breaks_handled}",
+        ),
+        GateResult(
+            "asset_class_model",
+            evidence.asset_class_model_verified,
+            f"verified={evidence.asset_class_model_verified}",
+        ),
+    )
+
+    performance_gates = (
         GateResult(
             "positive_expectancy_after_costs",
             evidence.expectancy_after_costs > 0,
@@ -135,16 +164,18 @@ def evaluate_promotion(
             f"robust={evidence.slippage_robust}",
         ),
     )
+    gates = evidence_gates + performance_gates
 
     core_pass = all(g.passed for g in gates)
     if not core_pass:
-        # Low sample/evidence remains research-only; failed economic/robustness
-        # evidence is rejected. This distinction avoids calling an untested
-        # strategy a loser while still preventing promotion.
+        # Missing samples/provenance are insufficient evidence, not proof of a
+        # losing strategy. Failed economic/robustness gates with sufficient
+        # evidence are classified REJECTED.
         insufficient = (
             evidence.historical_trades < t.min_historical_trades
             or evidence.untouched_trades < t.min_untouched_trades
             or not evidence.symbol_expectancy
+            or not all(g.passed for g in evidence_gates)
         )
         return PromotionDecision(
             status=StrategyStatus.RESEARCH_ONLY if insufficient else StrategyStatus.REJECTED,
