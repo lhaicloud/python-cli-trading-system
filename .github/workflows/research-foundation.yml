@@ -1,0 +1,108 @@
+name: Research Foundation Verification
+
+on:
+  push:
+    branches:
+      - research/multi-asset-perpetual-system
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Compile Python sources
+        run: python -m compileall -q app scripts
+
+      - name: Verify multi-asset data foundation
+        run: python -m scripts.verify_multi_asset_foundation
+
+      - name: Verify Binance archive implementation
+        run: python -m scripts.verify_binance_archive
+
+      - name: Verify research storage and backfill
+        run: python -m scripts.verify_research_storage
+
+      - name: Verify research governance
+        run: python -m scripts.verify_research_governance
+
+      - name: Verify loss stops and audit-chain governance
+        run: python -m scripts.verify_research_loss_governance
+
+      - name: Verify strict research backtester
+        run: python -m scripts.verify_research_backtester
+
+      - name: Verify historical quote safety
+        run: python -m scripts.verify_research_quote_safety
+
+      - name: Verify research strategy families
+        run: python -m scripts.verify_research_strategies
+
+      - name: Verify live metadata fail-closed behavior
+        run: python -m scripts.verify_live_metadata_safety
+
+  binance-archive-integration:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Verify real Binance Vision archives
+        run: python -m scripts.verify_binance_archive_live
+
+  preliminary-research:
+    needs: binance-archive-integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Run preliminary real-data multi-asset research
+        run: python -m scripts.run_preliminary_binance_research
+
+      - name: Upload research evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: preliminary-binance-research
+          path: research-output/preliminary-research.json
+          if-no-files-found: error
+          retention-days: 30

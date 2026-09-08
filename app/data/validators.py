@@ -58,15 +58,33 @@ def validate_all_timeframes(symbol: str, timeframes: list[str],
     return {tf: validate_candles(symbol, tf, start_ms, end_ms) for tf in timeframes}
 
 
+def is_timestamp_fresh(latest_ms: int, now_ms: int, timeframe: str) -> bool:
+    """Return True only when a stored candle timestamp is plausibly fresh.
+
+    The threshold is three timeframe intervals. Future timestamps fail closed.
+    """
+    interval_ms = tf_to_ms(timeframe)
+    age_ms = now_ms - latest_ms
+    return 0 <= age_ms < interval_ms * 3
+
+
 def data_is_sufficient(symbol: str, timeframe: str,
                         lookback_ms: int = 7 * 86_400_000) -> bool:
-    """Quick check: do we have at least some recent data?"""
+    """Fail closed when the latest stored candle is stale.
+
+    `lookback_ms` is retained for call-site compatibility but is deliberately
+    not used as an alternate freshness window. The old implementation accepted
+    data up to seven days old for every timeframe because it used an ``or``
+    condition against the generic lookback. That could mark stale 30m/1h data
+    as sufficient.
+    """
+    del lookback_ms
+
     latest = get_latest_candle_time(symbol, timeframe)
     if latest is None:
         return False
+
     import time as _time
+
     now_ms = int(_time.time() * 1000)
-    # Latest candle should be within 2 * interval_ms of now
-    interval_ms = tf_to_ms(timeframe)
-    stale_threshold = interval_ms * 3
-    return (now_ms - latest) < stale_threshold or (now_ms - latest) < lookback_ms
+    return is_timestamp_fresh(latest, now_ms, timeframe)
