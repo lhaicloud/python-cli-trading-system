@@ -67,6 +67,10 @@ def evidence(**overrides):
         parameter_neighborhood_stable=True,
         entry_delay_robust=True,
         slippage_robust=True,
+        market_data_integrity_passed=True,
+        execution_cost_evidence_verified=True,
+        structural_breaks_handled=True,
+        asset_class_model_verified=True,
         shadow_days=60,
         shadow_expectancy=0.2,
     )
@@ -78,6 +82,10 @@ print("\n4. Promotion gates")
 low_sample = evaluate_promotion(evidence(historical_trades=50, untouched_trades=20))
 check("low sample remains research-only", low_sample.status is StrategyStatus.RESEARCH_ONLY)
 check("low sample not promoted", not low_sample.passed)
+
+missing_provenance = evaluate_promotion(evidence(execution_cost_evidence_verified=False))
+check("missing execution evidence remains research-only", missing_provenance.status is StrategyStatus.RESEARCH_ONLY)
+check("execution evidence gate fails closed", any(g.name == "execution_cost_evidence" and not g.passed for g in missing_provenance.gates))
 
 concentrated = evaluate_promotion(evidence(symbol_profit={"A": 90, "B": 5, "C": 5}))
 check("concentrated strategy rejected", concentrated.status is StrategyStatus.REJECTED)
