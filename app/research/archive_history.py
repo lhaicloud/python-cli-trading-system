@@ -7,6 +7,7 @@ from typing import Iterable
 
 import httpx
 
+from app.research.archive_parsers import parse_signed_kline_bars
 from app.research.backtester import FundingEvent, MarketBar
 from app.research.binance_archive import (
     ArchiveDataset,
@@ -87,7 +88,11 @@ def load_monthly_bars(
         for month in month_range(start_ym, end_ym):
             url = archive_url(dataset, symbol, month, interval=interval, cadence="monthly")
             archive = download_verified_archive(url, client=http)
-            bars = parse_kline_bars(archive)
+            bars = (
+                parse_signed_kline_bars(archive)
+                if dataset is ArchiveDataset.PREMIUM_INDEX
+                else parse_kline_bars(archive)
+            )
             if not bars:
                 raise ArchiveError(f"empty {dataset.value} archive for {symbol} {month}")
             parts.append(bars)
