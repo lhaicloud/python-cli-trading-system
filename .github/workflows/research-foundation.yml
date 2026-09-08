@@ -53,6 +53,9 @@ jobs:
       - name: Verify research strategy families
         run: python -m scripts.verify_research_strategies
 
+      - name: Verify live metadata fail-closed behavior
+        run: python -m scripts.verify_live_metadata_safety
+
   binance-archive-integration:
     needs: verify
     runs-on: ubuntu-latest
