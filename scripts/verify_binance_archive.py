@@ -7,6 +7,8 @@ import hashlib
 import io
 import zipfile
 
+from app.research.archive_history import attach_mark_prices, month_range
+from app.research.backtester import FundingEvent, MarketBar
 from app.research.binance_archive import (
     ArchiveDataset,
     ArchiveError,
@@ -77,6 +79,7 @@ fund_url = archive_url(ArchiveDataset.FUNDING_RATE, "BTCUSDT", "2026-08", cadenc
 check("funding monthly path", fund_url.endswith("/monthly/fundingRate/BTCUSDT/BTCUSDT-fundingRate-2026-08.zip"), fund_url)
 book_url = archive_url(ArchiveDataset.BOOK_TICKER, "BTCUSDT", "2024-03-29", cadence="daily")
 check("bookTicker daily path", book_url.endswith("/daily/bookTicker/BTCUSDT/BTCUSDT-bookTicker-2024-03-29.zip"), book_url)
+check("inclusive month range", month_range("2026-06", "2026-08") == ("2026-06", "2026-07", "2026-08"))
 
 print("\n2. Checksum verification + kline parsing")
 k_rows = [
@@ -110,7 +113,19 @@ funding = parse_funding_events(f_archive)
 check("two funding events parsed", len(funding) == 2)
 check("funding sign preserved", funding[0].rate > 0 and funding[1].rate < 0)
 
-print("\n4. Historical bookTicker parsing")
+print("\n4. Look-ahead-safe mark/funding alignment")
+mark_bars = (
+    MarketBar(1000, 1999, 100.0, 112.0, 99.0, 110.0),
+    MarketBar(2000, 2999, 111.0, 115.0, 109.0, 114.0),
+)
+aligned = attach_mark_prices(
+    (FundingEvent(1000, 0.001), FundingEvent(2000, 0.001)),
+    mark_bars,
+)
+check("funding at candle open uses observable OPEN, not future close", aligned[0].mark_price == 100.0)
+check("next funding open uses next observable OPEN", aligned[1].mark_price == 111.0)
+
+print("\n5. Historical bookTicker parsing")
 b_rows = [
     ["update_id", "best_bid_price", "best_bid_qty", "best_ask_price", "best_ask_qty", "transaction_time", "event_time"],
     [2, "100.00", "3", "100.02", "4", 2000, 2000],
