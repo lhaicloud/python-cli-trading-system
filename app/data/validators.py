@@ -60,13 +60,26 @@ def validate_all_timeframes(symbol: str, timeframes: list[str],
 
 def data_is_sufficient(symbol: str, timeframe: str,
                         lookback_ms: int = 7 * 86_400_000) -> bool:
-    """Quick check: do we have at least some recent data?"""
+    """Fail closed when the latest stored candle is stale.
+
+    `lookback_ms` is retained for call-site compatibility but is deliberately
+    not used as an alternate freshness window. The old implementation accepted
+    data up to seven days old for every timeframe because it used an ``or``
+    condition against the generic lookback. That could mark stale 30m/1h data
+    as sufficient. Freshness is now bounded solely by the timeframe itself.
+    """
+    del lookback_ms
+
     latest = get_latest_candle_time(symbol, timeframe)
     if latest is None:
         return False
+
     import time as _time
+
     now_ms = int(_time.time() * 1000)
-    # Latest candle should be within 2 * interval_ms of now
     interval_ms = tf_to_ms(timeframe)
     stale_threshold = interval_ms * 3
-    return (now_ms - latest) < stale_threshold or (now_ms - latest) < lookback_ms
+    age_ms = now_ms - latest
+
+    # A future timestamp is also invalid rather than being treated as fresh.
+    return 0 <= age_ms < stale_threshold
