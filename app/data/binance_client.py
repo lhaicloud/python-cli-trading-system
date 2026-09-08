@@ -14,7 +14,6 @@ from app.utils.timeframes import tf_to_ms
 logger = get_logger(__name__)
 
 # Binance rate-limit: 1200 weight/min on /api endpoint.
-# GET /api/v3/klines costs 1 weight → safe to call up to ~20/s
 _REQUEST_PAUSE_S = 0.1
 _MAX_RETRIES = 5
 _RETRY_BACKOFF_S = 2.0
@@ -29,7 +28,7 @@ def _redact_proxy(url: str) -> str:
 
 
 class BinanceClient:
-    """Thin wrapper around Binance REST endpoints used by the strategy."""
+    """Thin wrapper around Binance USDⓈ-M public REST endpoints."""
 
     def __init__(self) -> None:
         cfg = get_settings()
@@ -50,6 +49,27 @@ class BinanceClient:
         data = self._get("/fapi/v1/time")
         return int(data["serverTime"])
 
+    @staticmethod
+    def _kline_params(
+        *,
+        key: str,
+        value: str,
+        interval: str,
+        start_ms: int | None,
+        end_ms: int | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            key: value.upper(),
+            "interval": interval,
+            "limit": min(limit, 1000),
+        }
+        if start_ms is not None:
+            params["startTime"] = start_ms
+        if end_ms is not None:
+            params["endTime"] = end_ms
+        return params
+
     def get_klines(
         self,
         symbol: str,
@@ -58,24 +78,73 @@ class BinanceClient:
         end_ms: int | None = None,
         limit: int | None = None,
     ) -> list[list[Any]]:
-        """
-        Fetch up to `limit` (max 1000) klines.
-
-        Each kline is a list:
-          [open_time, open, high, low, close, volume, close_time,
-           quote_volume, trades, taker_buy_base, taker_buy_quote, ignore]
-        """
-        params: dict[str, Any] = {
-            "symbol": symbol.upper(),
-            "interval": interval,
-            "limit": min(limit or self._limit, 1000),
-        }
-        if start_ms is not None:
-            params["startTime"] = start_ms
-        if end_ms is not None:
-            params["endTime"] = end_ms
-
+        """Fetch trade-price futures klines."""
+        params = self._kline_params(
+            key="symbol",
+            value=symbol,
+            interval=interval,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            limit=limit or self._limit,
+        )
         return self._get("/fapi/v1/klines", params=params)  # type: ignore[return-value]
+
+    def get_mark_price_klines(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int | None = None,
+    ) -> list[list[Any]]:
+        """Fetch historical mark-price klines for liquidation/fair-price research."""
+        params = self._kline_params(
+            key="symbol",
+            value=symbol,
+            interval=interval,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            limit=limit or self._limit,
+        )
+        return self._get("/fapi/v1/markPriceKlines", params=params)  # type: ignore[return-value]
+
+    def get_index_price_klines(
+        self,
+        pair: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int | None = None,
+    ) -> list[list[Any]]:
+        """Fetch historical index-price klines. Binance names this key `pair`."""
+        params = self._kline_params(
+            key="pair",
+            value=pair,
+            interval=interval,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            limit=limit or self._limit,
+        )
+        return self._get("/fapi/v1/indexPriceKlines", params=params)  # type: ignore[return-value]
+
+    def get_premium_index_klines(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int | None = None,
+    ) -> list[list[Any]]:
+        """Fetch historical premium-index klines."""
+        params = self._kline_params(
+            key="symbol",
+            value=symbol,
+            interval=interval,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            limit=limit or self._limit,
+        )
+        return self._get("/fapi/v1/premiumIndexKlines", params=params)  # type: ignore[return-value]
 
     def get_all_klines(
         self,
@@ -84,10 +153,7 @@ class BinanceClient:
         start_ms: int,
         end_ms: int,
     ) -> list[list[Any]]:
-        """
-        Paginate through klines from start_ms to end_ms.
-        Yields complete results in ascending open_time order.
-        """
+        """Paginate trade-price klines in ascending open-time order."""
         all_klines: list[list[Any]] = []
         current_start = start_ms
         interval_ms = tf_to_ms(interval)
@@ -105,12 +171,9 @@ class BinanceClient:
 
             all_klines.extend(batch)
             last_open_time = int(batch[-1][0])
-
-            # If we got fewer than the limit we're done
             if len(batch) < self._limit:
                 break
 
-            # Advance cursor past the last returned candle
             current_start = last_open_time + interval_ms
             time.sleep(_REQUEST_PAUSE_S)
 
@@ -120,23 +183,37 @@ class BinanceClient:
         data = self._get("/fapi/v1/ticker/price", params={"symbol": symbol.upper()})
         return float(data["price"])
 
-    def get_mark_price(self, symbol: str) -> float:
-        """
-        Current mark price — the same endpoint and field the live executor
-        reads (app/live/exchange.py get_mark_price). Paper's entry-drift gate
-        uses this rather than the last candle close so both units judge drift
-        against the same number.
-        """
+    def get_book_ticker(self, symbol: str) -> dict[str, Any]:
+        """Return public best bid/ask for executable-spread research."""
+        data = self._get("/fapi/v1/ticker/bookTicker", params={"symbol": symbol.upper()})
+        if not isinstance(data, dict):
+            raise ValueError(f"Unexpected bookTicker response for {symbol}")
+        return data
+
+    def get_premium_index(self, symbol: str) -> dict[str, Any]:
+        """Return current mark/index/funding snapshot from premiumIndex."""
         data = self._get("/fapi/v1/premiumIndex", params={"symbol": symbol.upper()})
+        if not isinstance(data, dict):
+            raise ValueError(f"Unexpected premiumIndex response for {symbol}")
+        return data
+
+    def get_mark_price(self, symbol: str) -> float:
+        """Return current mark price."""
+        data = self.get_premium_index(symbol)
         return float(data.get("markPrice") or 0)
 
     def get_funding_rate(self, symbol: str) -> float:
-        """
-        Current funding rate for a perpetual (e.g. 0.0001 = 0.01% per 8h).
-        Positive = longs pay shorts (crowded long); negative = shorts pay longs.
-        """
-        data = self._get("/fapi/v1/premiumIndex", params={"symbol": symbol.upper()})
+        """Return current funding rate (positive means longs pay shorts)."""
+        data = self.get_premium_index(symbol)
         return float(data.get("lastFundingRate", 0) or 0)
+
+    def get_funding_info(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        """Return current non-default funding interval/cap/floor information."""
+        params = {"symbol": symbol.upper()} if symbol else None
+        data = self._get("/fapi/v1/fundingInfo", params=params)
+        if not isinstance(data, list):
+            raise ValueError("Unexpected fundingInfo response")
+        return data
 
     def get_funding_history(
         self,
@@ -144,10 +221,7 @@ class BinanceClient:
         start_ms: int,
         end_ms: int,
     ) -> list[dict[str, Any]]:
-        """
-        Historical funding rates (one row per 8h settlement), paginated.
-        Returns [{"funding_time": ms, "rate": float}, ...] ascending.
-        """
+        """Historical funding rates, paginated in ascending settlement time."""
         out: list[dict[str, Any]] = []
         cursor = start_ms
         while cursor < end_ms:
