@@ -9,6 +9,7 @@ SHA-256 CHECKSUM before parsing.
 from __future__ import annotations
 
 from app.research.archive_parsers import parse_signed_kline_bars
+from app.research.archive_sample import download_verified_archive_sample
 from app.research.binance_archive import (
     ArchiveDataset,
     archive_url,
@@ -61,21 +62,24 @@ for symbol in ("BTCUSDT", "XAUUSDT"):
         raise RuntimeError(f"{symbol}: funding archive parsed no events")
     print(f"PASS {'fundingRate':20s} {symbol:10s} rows={len(funding):4d} sha256={funding_archive.sha256[:16]}…")
 
-# Historical L1 proof: this exact USD-M archive family contains event-level
-# best bid/ask changes. A fixed ETH date is used because the file is known to
-# predate the later archive-coverage limitations.
+# Historical L1 proof. bookTicker can expand to hundreds of MB, so the WHOLE
+# ZIP checksum is verified while CSV decompression is deliberately bounded.
 book_url = archive_url(
     ArchiveDataset.BOOK_TICKER,
     "ETHUSDT",
     "2024-01-15",
     cadence="daily",
 )
-book_archive = download_verified_archive(book_url, max_uncompressed_bytes=512 * 1024 * 1024)
+book_archive = download_verified_archive_sample(
+    book_url,
+    max_rows=10_000,
+    max_compressed_bytes=256 * 1024 * 1024,
+)
 quotes = parse_book_quotes(book_archive)
 if len(quotes) < 100:
-    raise RuntimeError(f"ETHUSDT bookTicker: unexpectedly few quotes ({len(quotes)})")
+    raise RuntimeError(f"ETHUSDT bookTicker: unexpectedly few sampled quotes ({len(quotes)})")
 if any(q.ask < q.bid for q in quotes):
     raise RuntimeError("ETHUSDT bookTicker: crossed invalid quote")
-print(f"PASS {'bookTicker':20s} {'ETHUSDT':10s} rows={len(quotes):4d} sha256={book_archive.sha256[:16]}…")
+print(f"PASS {'bookTicker sample':20s} {'ETHUSDT':10s} rows={len(quotes):4d} sha256={book_archive.sha256[:16]}…")
 
 print("ALL LIVE ARCHIVE CHECKS PASSED")
