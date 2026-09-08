@@ -44,6 +44,9 @@ jobs:
       - name: Verify research governance
         run: python -m scripts.verify_research_governance
 
+      - name: Verify loss stops and audit-chain governance
+        run: python -m scripts.verify_research_loss_governance
+
       - name: Verify strict research backtester
         run: python -m scripts.verify_research_backtester
 
